@@ -8,6 +8,22 @@
 
 [English README](README.md)
 
+## 동작 구조
+
+```mermaid
+flowchart TD
+    subgraph machine["내 컴퓨터 안"]
+        A["inbox/<br>녹음 파일 도착"] --> B["전사 + 화자분리<br>whisper (mlx / faster) + pyannote"]
+        FP[("화자 지문 DB<br>회차마다 축적")] <--> B
+        B --> C["모임 양식으로 정리<br>렌즈 · 스타일 · 팩"]
+        C --> D["results/<br>정리 md + 전사 txt"]
+        V["enroll · verify 명령"] -.-> FP
+    end
+    C -.->|"클라우드 백엔드 선택 시에만<br>전사본 전송 (claude_cli · anthropic_api)"| LLM["클라우드 LLM"]
+```
+
+오디오·화자분리·지문은 점선을 절대 넘지 않습니다. `ollama`·`none` 백엔드를 고르면 아무것도 넘지 않습니다.
+
 ## 이미 많은 whisper + pyannote 스크립트와 뭐가 다른가
 
 일회성 화자분리 스크립트는 모든 녹음을 "처음 만난 사람들의 방"으로 취급합니다. 반복 모임은 다릅니다 — 격주마다 같은 여섯 명이잖아요. moim-scribe는 그 사실을 이용합니다.

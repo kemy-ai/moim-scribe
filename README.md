@@ -8,6 +8,22 @@
 
 [한국어 README](README.ko.md)
 
+## How it works
+
+```mermaid
+flowchart TD
+    subgraph machine["on your machine"]
+        A["inbox/<br>recording lands"] --> B["transcribe + diarize<br>whisper (mlx / faster) + pyannote"]
+        FP[("speaker fingerprints<br>grow every session")] <--> B
+        B --> C["summarize with your group's<br>lens · style · pack"]
+        C --> D["results/<br>notes md + diarized transcript"]
+        V["enroll · verify commands"] -.-> FP
+    end
+    C -.->|"transcript only, and only with a cloud<br>backend (claude_cli · anthropic_api)"| LLM["cloud LLM"]
+```
+
+Audio, diarization, and fingerprints never cross the dashed line; with the `ollama` or `none` summarizer, nothing does.
+
 ## Why another whisper + pyannote script?
 
 One-shot diarization scripts treat every recording as a room full of strangers. Recurring groups aren't: it's the same six people every other week. moim-scribe exploits that.
