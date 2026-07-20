@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 import unicodedata
 from datetime import datetime, timezone
@@ -270,6 +271,26 @@ class PipelineLock:
         self.lock_dir = workspace / ".moim-scribe.lock"
 
     def _pid_alive(self, pid: int) -> bool:
+        if sys.platform == "win32":
+            # os.kill(pid, 0) is NOT a liveness probe on Windows: signal 0 is
+            # CTRL_C_EVENT, which gets broadcast to our own console group and
+            # KeyboardInterrupts the caller (found the hard way in CI). Ask
+            # the kernel instead.
+            import ctypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return False
+            try:
+                exit_code = ctypes.c_ulong()
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    return exit_code.value == STILL_ACTIVE
+                return True  # opened but unqueryable — err on "alive" (keeps the lock)
+            finally:
+                kernel32.CloseHandle(handle)
         try:
             os.kill(pid, 0)
             return True
