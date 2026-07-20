@@ -2,7 +2,9 @@
 
 **A local voice pipeline built for recurring meetings — the more often the same people meet, the more accurate it gets.**
 
-*moim* (모임) is Korean for a small recurring gathering — a book club, a writing circle, a weekly team sync. moim-scribe watches a folder, and when a recording lands in it: transcribes (whisper) → separates speakers (pyannote) → **matches voices against a fingerprint database that grows with every session** → writes structured notes using the template for that type of meeting. Everything runs on your machine.
+*moim* (모임) is Korean for a small recurring gathering — a book club, a writing circle, a weekly team sync. moim-scribe watches a folder, and when a recording lands in it: transcribes (whisper) → separates speakers (pyannote) → **matches voices against a fingerprint database that grows with every session** → writes structured notes using the template for that type of meeting. Audio, diarization, and voice fingerprints never leave your machine; the final summarization step is your choice — fully local (Ollama, or none) or a cloud LLM (Claude).
+
+> **Consent first.** moim-scribe is built for groups that record themselves with everyone's informed consent. Voice fingerprints are biometric data — never use this tool to record or identify people covertly. In many jurisdictions that is illegal, not just impolite: [docs/privacy.md](docs/privacy.md).
 
 [한국어 README](README.ko.md)
 
@@ -77,12 +79,12 @@ Only enroll ranges a human has confirmed — the discipline that keeps the datab
 
 ## Summarizer backends
 
-| backend | needs | notes |
+| backend | needs | transcript leaves your machine? |
 |---|---|---|
-| `claude_cli` (default) | Claude Code installed | uses your existing login, no key handling |
-| `anthropic_api` | `ANTHROPIC_API_KEY` | direct Messages API call |
-| `ollama` | Ollama running locally | fully offline pipeline |
-| `none` | nothing | stops at the diarized transcript |
+| `claude_cli` (default) | Claude Code installed | yes — sent to Anthropic via your existing login |
+| `anthropic_api` | `ANTHROPIC_API_KEY` | yes — sent to Anthropic's Messages API |
+| `ollama` | Ollama running locally | no — fully offline pipeline |
+| `none` | nothing | no — stops at the diarized transcript |
 
 Switch in `config.yaml`. Lenses ship in Korean and English (`--language`).
 
@@ -91,7 +93,7 @@ Switch in `config.yaml`. Lenses ship in Korean and English (`--language`).
 Voice fingerprints are **biometric personal data**, and recordings capture private conversation.
 
 - **Record and enroll only with every participant's consent.** In many jurisdictions this is a legal requirement, not a courtesy — e.g. under Korea's Personal Information Protection Act, voiceprints used to identify a person are sensitive biometric information requiring separate explicit consent.
-- Everything stays local: after the first model download the fingerprint step runs offline by design.
+- Audio processing, diarization, and fingerprinting stay local; after the first model download the fingerprint step runs offline by design. Only the optional summarization step can send the transcript to a cloud LLM — and you pick that backend.
 - The workspace keeps fingerprints (`speakers/`), recordings, and rosters outside the repo, and `init` drops a defensive `.gitignore` in the workspace. Never publish a workspace.
 
 Details: [docs/privacy.md](docs/privacy.md).

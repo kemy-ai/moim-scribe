@@ -36,10 +36,10 @@ stt_backend: {stt_backend}
 # stt_model: null            # override the backend's default whisper model
 
 # Summarizer backend: claude_cli | anthropic_api | ollama | none
-#   claude_cli    uses your existing Claude Code login (no key needed)
-#   anthropic_api needs ANTHROPIC_API_KEY
+#   claude_cli    your existing Claude Code login — sends the transcript to Anthropic
+#   anthropic_api needs ANTHROPIC_API_KEY — sends the transcript to Anthropic
 #   ollama        local model, fully offline (needs Ollama running)
-#   none          stop after transcription — no LLM involved
+#   none          stop after transcription — nothing leaves this machine
 summarizer: claude_cli
 # summarizer_model: null     # e.g. sonnet / claude-sonnet-5 / llama3.1
 # summarizer_timeout_sec: 900

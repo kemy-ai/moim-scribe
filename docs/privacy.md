@@ -1,5 +1,16 @@
 # Privacy: recordings, voice fingerprints, and consent
 
+## Acceptable use
+
+moim-scribe exists for one purpose: groups recording **themselves**, with
+everyone's informed consent, to keep better notes of their own meetings.
+
+Do not use it to record people covertly, to identify speakers who have not
+agreed to voice enrollment, or to process recordings you were not a party
+to. Beyond being a violation of this project's intent, covert recording
+and non-consensual biometric identification are criminal or actionable
+offenses in many jurisdictions.
+
 moim-scribe processes two kinds of highly personal data:
 
 - **Recordings** — private conversations of identifiable people.
