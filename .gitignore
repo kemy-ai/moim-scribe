@@ -52,3 +52,4 @@ Thumbs.db
 
 # Local-only project notes (never published)
 .local/
+HANDOFF*.md
