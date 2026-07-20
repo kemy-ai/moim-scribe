@@ -1,0 +1,54 @@
+# ── Privacy guard ─────────────────────────────────────────────
+# Voice fingerprints are biometric data. Never commit them.
+speakers/
+# …but the shipped source subpackage of the same name MUST be committed
+# (the later *.npy rule still blocks any fingerprint file even here):
+!src/moim_scribe/speakers/
+!src/moim_scribe/speakers/**
+*.npy
+# Recordings and working audio may contain private conversations.
+*.wav
+*.m4a
+*.mp3
+*.flac
+*.ogg
+*.aac
+*.opus
+# Secrets
+.hf_token
+.env
+# User data folders (when created inside a repo clone)
+data/
+inbox/
+results/
+_processing/
+_done/
+_error/
+# Only lenses, styles, and synthetic examples ship with the repo.
+# Any other pack directory is treated as personal data.
+packs/*
+!packs/lenses
+!packs/styles
+!packs/examples
+# Per-round history cards accumulate real meeting content.
+_history/
+# Model caches (downloaded locally, never committed)
+pretrained_models/
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# ── OS ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# Local-only project notes (never published)
+.local/

@@ -1,0 +1,765 @@
+"""Diarization core: transcribe + separate speakers + identify against fingerprints.
+
+The whole recording is (1) re-transcribed segment-by-segment by a whisper
+backend and (2) speaker-diarized by pyannote, then the two are merged into
+a "who said what, when" script. If fingerprints are enrolled, cluster-level
+identification swaps SPEAKER_NN labels for real names, and a merge-detection
+pass repairs the classic pyannote failure where two similar voices (e.g.
+same-sex speakers) collapse into one cluster.
+
+Every threshold below was tuned on long real-world multi-speaker meeting
+recordings (20-90 minutes). They are deliberately kept as named module
+constants: if you re-tune, change them here and nowhere else.
+"""
+from __future__ import annotations
+
+import glob
+import json
+import logging
+import os
+import subprocess
+import time
+from collections import Counter
+from pathlib import Path
+
+from .lang import detect_num_speakers
+from .speakers.db import SpeakerDB
+from .stt import STTBackend, Segment
+
+logger = logging.getLogger("moim_scribe.diarize")
+
+PID = os.getpid()
+# Temp filenames carry the PID so two concurrent runs over files in the same
+# directory can never clobber each other's working audio (observed failure:
+# the shorter file finishes first, truncates the shared temp wav, and the
+# longer run crashes inside pyannote reading past the new end).
+
+HEAD_WINDOW_SEC = 90  # window for the spoken attendee-count cue; head transcription uses the same value
+
+# Deterministic collapse of whisper repetition loops. Decoding options alone
+# reduce but do not eliminate them (temperature retries reopen the path), so
+# a post-pass drops runs of identical text. Humans essentially never repeat
+# the exact same sentence 3+ times verbatim; and when segment start times
+# are near-perfectly uniform (machine-regular intervals like exactly 1.0s or
+# 30.0s), confidence is higher still, so collapse harder.
+DEDUPE_MIN_REPEAT = 3
+DEDUPE_KEEP = 2
+DEDUPE_UNIFORM_TOL_SEC = 0.15
+DEDUPE_UNIFORM_KEEP = 1
+
+IDENTIFY_THRESHOLD = 0.6  # cosine similarity for cluster-mean identification.
+# Measured separation: true matches (cross-recording) 0.91-0.96, best false
+# match of a non-enrolled voice 0.49 — 0.6 splits these safely. Re-validate
+# if the enrolled population grows a lot.
+IDENTIFY_MAX_SEGMENTS = 40  # embed only the N longest ranges per cluster (efficiency)
+
+# Merge detection & enrollment-based reassignment. When pyannote fuses two
+# enrolled speakers into one cluster, cluster-mean identification can only
+# name one of them; the segment-level pass below finds clusters whose
+# segments split across 2+ enrolled names and re-labels the transcript.
+MIN_EMB_SEC = 1.0    # trust floor for a single-segment embedding
+MAX_EMB_SEC = 15.0   # trust ceiling — abnormally long segments are usually
+# whisper hallucinations over silence (observed: repeated farewell phrases at
+# exactly 30.0s intervals, even with backwards timestamps). They embed as
+# nobody-in-particular and were the main source of misassignment, so they are
+# excluded both as evidence and from reassignment.
+MERGE_MIN_SHARE = 0.25      # a name "wins" a share of a cluster at >= this fraction
+MERGE_MIN_TALK_SEC = 20.0   # minimum matched-speech sample before judging a merge
+MERGE_DETECT_MAX_SEGMENTS = 2000  # effectively exhaustive; sampling "top 40 longest"
+# made detection non-reproducible because whisper/pyannote boundaries shift
+# between runs and a different 40 got sampled each time. Full sweep measured
+# cheap (800-900 segments re-checked in 9-17s), so stability wins.
+REASSIGN_UNKNOWN_THRESHOLD = 0.20  # below this best-similarity a segment is
+# treated as "not one of the expected attendees" and its label is never
+# touched (protects unenrolled/new speakers). Swept on real meetings: 0.35
+# (derived from the cluster-mean threshold) was far too conservative for
+# single noisy segments and under-restored the merged speaker; 0.20 matched
+# an independently verified reference share almost exactly.
+REASSIGN_MARGIN_MIN = 0.05  # if best-vs-second similarity margin is smaller,
+# the segment is ambiguous — inherit the neighboring confident label instead
+REASSIGN_SMOOTH_MAX_SEC = 3.0  # absorb isolated one-offs (A B A -> A A A) under this length
+
+MERGE_WINNER_MIN_AVG_SIM = 0.28  # a merge "winner" needs not just share but
+# a minimum average similarity over its matched segments. Share alone can be
+# stolen by a near-pair: two enrolled-but-unrelated voices measured as high
+# as 0.55 mutual similarity, so noise can hand one of them 25%+ of a cluster
+# and promote a non-attendee into the reassignment anchor set (local error
+# becoming global contamination). Swept 0.20-0.32 on real merges: genuine
+# merge parties averaged 0.32-0.35 (full-sweep averages run lower than
+# longest-40 averages), non-attendees 0.22-0.30 — 0.28 keeps the former and
+# is a second line of defense against the latter (share filter is the first).
+
+
+def get_hf_token(data_dir: Path, arg_token: str | None = None) -> str:
+    """Resolve the Hugging Face token: argument > HF_TOKEN env > <data_dir>/.hf_token."""
+    if arg_token:
+        return arg_token
+    if os.environ.get("HF_TOKEN"):
+        return os.environ["HF_TOKEN"]
+    p = data_dir / ".hf_token"
+    if p.exists():
+        return p.read_text().strip()
+    raise SystemExit(
+        "No Hugging Face token found. Set HF_TOKEN, create "
+        f"{p}, or pass --token. See docs/setup-pyannote.md"
+    )
+
+
+def concat_audio(session: str) -> str:
+    """Concatenate chunks/chunk_*.wav (or full_*.wav) into one working wav."""
+    chunks = sorted(glob.glob(os.path.join(session, "chunks", "chunk_*.wav")))
+    if not chunks:
+        chunks = sorted(glob.glob(os.path.join(session, "full_*.wav")))
+    if not chunks:
+        raise SystemExit("no audio found (chunks/ or full_*.wav)")
+    out = os.path.join(session, f"_diarize_full_{PID}.wav")
+    listf = os.path.join(session, f"_concat_list_{PID}.txt")
+    with open(listf, "w") as f:
+        for c in chunks:
+            # ffmpeg concat-list quoting: a literal single quote inside a
+            # quoted path must be written as '\'' or the list parser breaks.
+            quoted = os.path.abspath(c).replace("'", "'\\''")
+            f.write(f"file '{quoted}'\n")
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
+         "-i", listf, "-c", "copy", out],
+        check=True,
+    )
+    return out
+
+
+def prepare_audio(inp: str, workdir: str) -> str:
+    """Single audio file -> 16k mono wav; directory -> chunk concat."""
+    if os.path.isfile(inp):
+        out = os.path.join(workdir, f"_diarize_full_{PID}.wav")
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", inp, "-ar", "16000", "-ac", "1", out],
+            check=True,
+        )
+        return out
+    return concat_audio(inp)
+
+
+def load_initial_prompt(glossary_path: Path) -> str | None:
+    """Optional glossary file injected as the whisper initial_prompt.
+
+    The prompt window is ~224 tokens; keep the file short — a natural
+    sentence listing domain proper nouns works best. A broken or unreadable
+    glossary must never kill the pipeline, so failures degrade to None.
+    """
+    if not glossary_path.exists():
+        return None
+    try:
+        text = glossary_path.read_text(encoding="utf-8").strip()
+        return text or None
+    except Exception as e:  # noqa: BLE001 — auxiliary feature, degrade silently
+        logger.warning(f"glossary unreadable, continuing without prompt: {e}")
+        return None
+
+
+def dedupe_repeated_segments(
+    segs: list[Segment],
+    min_repeat: int = DEDUPE_MIN_REPEAT,
+    keep: int = DEDUPE_KEEP,
+    uniform_tol: float = DEDUPE_UNIFORM_TOL_SEC,
+    uniform_keep: int = DEDUPE_UNIFORM_KEEP,
+) -> tuple[list[Segment], int]:
+    """Collapse whisper repetition loops. Pure function: returns a new list.
+
+    Runs of identical text of length >= min_repeat are collapsed to the
+    first `keep` occurrences; if the start-time intervals of the run are
+    uniform within uniform_tol (the machine-regular signature), collapse to
+    `uniform_keep`. Returns (cleaned segments, number removed).
+    """
+    if not segs:
+        return list(segs), 0
+    out: list[Segment] = []
+    n_removed = 0
+    i, n = 0, len(segs)
+    while i < n:
+        text = segs[i][2].strip()
+        j = i
+        while j < n and segs[j][2].strip() == text:
+            j += 1
+        run = segs[i:j]
+        run_len = j - i
+        if text and run_len >= min_repeat:
+            intervals = [run[k + 1][0] - run[k][0] for k in range(run_len - 1)]
+            uniform = bool(intervals) and (max(intervals) - min(intervals)) <= uniform_tol
+            keep_n = min(uniform_keep if uniform else keep, run_len)
+            out.extend(run[:keep_n])
+            n_removed += run_len - keep_n
+        else:
+            out.extend(run)
+        i = j
+    return out, n_removed
+
+
+def transcribe_segments(
+    backend: STTBackend, audio: str, language: str, initial_prompt: str | None = None
+) -> list[Segment]:
+    """Backend transcription + deterministic repetition-loop collapse."""
+    segs = backend.transcribe(audio, language=language, initial_prompt=initial_prompt)
+    deduped, n_removed = dedupe_repeated_segments(segs)
+    if n_removed:
+        logger.info(
+            f"collapsed whisper repetition loops: {n_removed} segments removed "
+            f"({DEDUPE_MIN_REPEAT}+ identical in a row)"
+        )
+    return deduped
+
+
+def diarize_turns(audio: str, token: str, num_speakers: int | None) -> list[tuple[float, float, str]]:
+    """Run pyannote speaker diarization. num_speakers=None lets pyannote estimate.
+
+    A fixed speaker count matters for small meetings: auto-estimation tends
+    to over-split 2-person conversations into 3-4 clusters.
+    """
+    # pyannote.audio 4.x phones home usage metrics by default. This tool
+    # processes private conversations, so telemetry is opt-in: users who want
+    # to support pyannote's stats can export PYANNOTE_METRICS_ENABLED=true.
+    os.environ.setdefault("PYANNOTE_METRICS_ENABLED", "false")
+    import torch
+    from pyannote.audio import Pipeline
+
+    pipe = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=token)
+    if torch.backends.mps.is_available():
+        pipe.to(torch.device("mps"))
+    elif torch.cuda.is_available():
+        pipe.to(torch.device("cuda"))
+    out = pipe(audio, num_speakers=num_speakers) if num_speakers else pipe(audio)
+    # pyannote 4.x: DiarizeOutput.speaker_diarization is the Annotation
+    ann = out.speaker_diarization if hasattr(out, "speaker_diarization") else out
+    return [(t.start, t.end, spk) for t, _, spk in ann.itertracks(yield_label=True)]
+
+
+def speaker_at(turns: list[tuple[float, float, str]], t: float) -> str:
+    """Speaker label containing (or nearest to) time t."""
+    for s, e, spk in turns:
+        if s <= t <= e:
+            return spk
+    best, bestd = "UNKNOWN", 1e9
+    for s, e, spk in turns:
+        d = min(abs(t - s), abs(t - e))
+        if d < bestd:
+            best, bestd = spk, d
+    return best
+
+
+def identify_speakers(
+    wav, sr: int, merged: list[dict], db_embeddings: dict, model_dir: Path,
+    threshold: float = IDENTIFY_THRESHOLD,
+) -> tuple[list[dict], dict, dict]:
+    """Replace SPEAKER_NN labels with enrolled names via cluster-mean matching.
+
+    wav/db_embeddings are loaded once by the caller and shared with the
+    merge-detection pass (avoids duplicate disk I/O). Returns
+    (relabeled merged, {SPEAKER_NN: name}, {SPEAKER_NN: [(name, score), ...]}).
+    """
+    from .speakers.embed import cosine_similarity, extract_embedding_from_segments
+
+    if not db_embeddings:
+        logger.info("fingerprint DB empty — skipping identification (labels stay SPEAKER_NN)")
+        return merged, {}, {}
+
+    by_speaker: dict[str, list[tuple[float, float]]] = {}
+    for m in merged:
+        by_speaker.setdefault(m["speaker"], []).append((m["start"], m["end"]))
+
+    logger.info(
+        f"identifying speakers… ({len(db_embeddings)} enrolled: {', '.join(db_embeddings)})"
+    )
+
+    mapping: dict[str, str] = {}
+    sims_log: dict[str, list] = {}
+    for spk, segments in by_speaker.items():
+        emb, used_sec = extract_embedding_from_segments(
+            wav, sr, segments, model_dir, max_segments=IDENTIFY_MAX_SEGMENTS
+        )
+        if emb is None:
+            continue
+        scored = sorted(
+            ((name, cosine_similarity(emb, e)) for name, e in db_embeddings.items()),
+            key=lambda kv: -kv[1],
+        )
+        best_name, best_score = scored[0]
+        sims_log[spk] = scored
+        if best_score >= threshold:
+            mapping[spk] = best_name
+            logger.info(
+                f"  {spk} -> {best_name} (similarity {best_score:.3f} >= {threshold}, "
+                f"{used_sec:.1f}s basis)"
+            )
+        else:
+            logger.info(
+                f"  {spk} -> no match (best {best_score:.3f} < {threshold}, label kept)"
+            )
+
+    if not mapping:
+        return merged, mapping, sims_log
+
+    for m in merged:
+        if m["speaker"] in mapping:
+            m["speaker"] = mapping[m["speaker"]]
+    return merged, mapping, sims_log
+
+
+def _segment_identify(
+    wav, sr: int, start: float, end: float, anchors: dict, unknown_threshold: float,
+    model_dir: Path,
+) -> tuple[str | None, float, float]:
+    """Embed a single range and argmax against pre-loaded anchor embeddings.
+
+    Called thousands of times per recording, so it does zero disk I/O:
+    anchors are passed in, audio is already in memory.
+    Returns (best name or None, best score, margin best-vs-second).
+    """
+    from .speakers.embed import cosine_similarity, extract_embedding_from_segments
+
+    emb, _used = extract_embedding_from_segments(wav, sr, [(start, end)], model_dir)
+    if emb is None:
+        return None, 0.0, 0.0
+    sims = sorted(
+        ((name, cosine_similarity(emb, e)) for name, e in anchors.items()),
+        key=lambda kv: -kv[1],
+    )
+    best_name, best_score = sims[0]
+    margin = best_score - (sims[1][1] if len(sims) > 1 else -1.0)
+    if best_score < unknown_threshold:
+        return None, best_score, margin
+    return best_name, best_score, margin
+
+
+def detect_cluster_merges(
+    wav, sr: int, merged: list[dict], raw_labels: list[str], db: dict, model_dir: Path,
+    min_share: float = MERGE_MIN_SHARE,
+    min_talk_sec: float = MERGE_MIN_TALK_SEC,
+    unknown_threshold: float = REASSIGN_UNKNOWN_THRESHOLD,
+    max_sample_segments: int = MERGE_DETECT_MAX_SEGMENTS,
+    min_avg_sim: float = MERGE_WINNER_MIN_AVG_SIM,
+) -> dict:
+    """Find pyannote clusters whose segments split across 2+ enrolled names.
+
+    Cluster-mean identification cannot see a merge (one mean, one name), so
+    this pass checks every eligible segment of every cluster individually.
+    A name "wins" a cluster share only with BOTH enough share (min_share)
+    and enough average similarity (min_avg_sim) — the AND guards against
+    near-pair contamination described at MERGE_WINNER_MIN_AVG_SIM.
+
+    Returns {raw_label: {"talk": {name: sec}, "winners": [...], "avg_sim": {...}}}
+    for suspect clusters only.
+    """
+    by_cluster: dict[str, list[dict]] = {}
+    for m, raw in zip(merged, raw_labels):
+        by_cluster.setdefault(raw, []).append(m)
+
+    suspects: dict = {}
+    for raw, segs in by_cluster.items():
+        cand = [s for s in segs if MIN_EMB_SEC <= (s["end"] - s["start"]) <= MAX_EMB_SEC]
+        if len(cand) > max_sample_segments:
+            cand.sort(key=lambda s: s["end"] - s["start"], reverse=True)
+            cand = cand[:max_sample_segments]
+        talk: Counter = Counter()
+        score_sum: Counter = Counter()
+        score_n: Counter = Counter()
+        for s in cand:
+            name, score, _margin = _segment_identify(
+                wav, sr, s["start"], s["end"], db, unknown_threshold, model_dir
+            )
+            if name:
+                talk[name] += s["end"] - s["start"]
+                score_sum[name] += score
+                score_n[name] += 1
+        total = sum(talk.values())
+        if total < min_talk_sec:
+            continue
+        avg_sim = {n: score_sum[n] / score_n[n] for n in talk}
+        winners = [n for n, v in talk.items() if v / total >= min_share and avg_sim[n] >= min_avg_sim]
+        if len(winners) >= 2:
+            suspects[raw] = {
+                "talk": dict(talk),
+                "winners": winners,
+                "avg_sim": {n: round(v, 3) for n, v in avg_sim.items()},
+            }
+    return suspects
+
+
+def reassign_with_anchors(
+    wav, sr: int, merged: list[dict], anchors: dict, model_dir: Path,
+    unknown_threshold: float = REASSIGN_UNKNOWN_THRESHOLD,
+    margin_min: float = REASSIGN_MARGIN_MIN,
+    smooth_max_sec: float = REASSIGN_SMOOTH_MAX_SEC,
+) -> tuple[list[str], dict]:
+    """Re-label every segment by argmax over the attendee anchor set.
+
+    Segments below unknown_threshold (not an expected attendee) and
+    segments longer than MAX_EMB_SEC (hallucination suspects) keep their
+    existing label untouched. Ambiguous segments (margin below margin_min)
+    inherit the nearest confident neighbor; isolated one-offs shorter than
+    smooth_max_sec sandwiched between the same speaker are absorbed —
+    but never across kept (protected) segments.
+
+    Returns (new labels, stats).
+    """
+    n = len(merged)
+    assigned: list[str | None] = [None] * n
+    keep = [False] * n  # True = protected: unenrolled or too-long, label untouched
+    n_conf = n_keep_unregistered = n_keep_toolong = 0
+
+    for i, s in enumerate(merged):
+        dur = s["end"] - s["start"]
+        if dur < MIN_EMB_SEC:
+            continue  # too short — filled by inheritance below
+        if dur > MAX_EMB_SEC:
+            keep[i] = True
+            n_keep_toolong += 1
+            continue
+        name, _score, margin = _segment_identify(
+            wav, sr, s["start"], s["end"], anchors, unknown_threshold, model_dir
+        )
+        if name is None:
+            keep[i] = True
+            n_keep_unregistered += 1
+            continue
+        if margin >= margin_min:
+            assigned[i] = name
+            n_conf += 1
+        # margin too small: leave None, inheritance fills it
+
+    last = None
+    for i in range(n):
+        if keep[i]:
+            continue
+        if assigned[i] is None:
+            assigned[i] = last
+        else:
+            last = assigned[i]
+    nxt = None
+    for i in range(n - 1, -1, -1):
+        if keep[i]:
+            continue
+        if assigned[i] is None:
+            assigned[i] = nxt
+        else:
+            nxt = assigned[i]
+
+    n_smooth = 0
+    for i in range(1, n - 1):
+        if keep[i - 1] or keep[i] or keep[i + 1]:
+            continue
+        if (
+            assigned[i - 1] is not None
+            and assigned[i - 1] == assigned[i + 1]
+            and assigned[i] != assigned[i - 1]
+            and (merged[i]["end"] - merged[i]["start"]) < smooth_max_sec
+        ):
+            assigned[i] = assigned[i - 1]
+            n_smooth += 1
+
+    new_labels = []
+    for i, s in enumerate(merged):
+        if keep[i] or assigned[i] is None:
+            new_labels.append(s["speaker"])
+        else:
+            new_labels.append(assigned[i])
+
+    stats = {
+        "n_total": n,
+        "n_confident": n_conf,
+        "n_keep_unregistered": n_keep_unregistered,
+        "n_keep_toolong": n_keep_toolong,
+        "n_smooth": n_smooth,
+    }
+    return new_labels, stats
+
+
+def detect_and_fix_merged_speakers(
+    wav, sr: int, merged: list[dict], raw_labels: list[str], id_mapping: dict, db: dict,
+    model_dir: Path,
+) -> tuple[list[dict], dict]:
+    """Merge detection + (when triggered) enrollment-based reassignment.
+
+    Pure in effect until the very end: all computation happens first, and
+    merged is only mutated once the new labels are fully decided, so a
+    partial failure leaves the original labels intact (the caller also
+    wraps this in try/except — the pipeline must always finish).
+
+    Returns (merged, info) with info = {triggered, suspects, anchors, stats}.
+    """
+    info: dict = {"triggered": False, "suspects": {}, "anchors": [], "stats": {}}
+
+    if len(db) < 2 or len(set(raw_labels)) < 2:
+        return merged, info  # a merge needs 2+ enrolled and 2+ clusters
+
+    suspects = detect_cluster_merges(wav, sr, merged, raw_labels, db, model_dir)
+    info["suspects"] = {
+        raw: {
+            "talk": {n: round(v, 1) for n, v in d["talk"].items()},
+            "winners": d["winners"],
+            "avg_sim": d["avg_sim"],
+        }
+        for raw, d in suspects.items()
+    }
+    if not suspects:
+        return merged, info
+
+    for raw, d in suspects.items():
+        who = ", ".join(
+            f"{n}({v:.0f}s, sim {d['avg_sim'].get(n, 0):.2f})"
+            for n, v in sorted(d["talk"].items(), key=lambda kv: -kv[1])
+        )
+        logger.info(
+            f"merge suspect: {raw} (identified as {id_mapping.get(raw, raw)}) "
+            f"splits into {who} -> anchor candidates {d['winners']}"
+        )
+
+    anchor_names = set(id_mapping.values())
+    for d in suspects.values():
+        anchor_names |= set(d["winners"])
+    anchor_names &= set(db.keys())
+    if len(anchor_names) < 2:
+        logger.info("merge suspected but fewer than 2 anchors — keeping labels")
+        return merged, info
+
+    info["anchors"] = sorted(anchor_names)
+    logger.info(
+        f"enrollment reassignment triggered — anchors: {', '.join(info['anchors'])} "
+        f"(re-checking all {len(merged)} segments)"
+    )
+
+    anchors = {n: db[n] for n in anchor_names}
+    before: Counter = Counter()
+    for m in merged:
+        before[m["speaker"]] += m["end"] - m["start"]
+
+    new_labels, stats = reassign_with_anchors(wav, sr, merged, anchors, model_dir)
+    info["stats"] = stats
+    info["triggered"] = True
+    for m, new in zip(merged, new_labels):
+        m["speaker"] = new
+
+    after: Counter = Counter()
+    for m in merged:
+        after[m["speaker"]] += m["end"] - m["start"]
+    tot_b, tot_a = sum(before.values()) or 1, sum(after.values()) or 1
+    logger.info("talk share before/after reassignment:")
+    for name in sorted(set(before) | set(after), key=lambda n: -after.get(n, 0)):
+        logger.info(
+            f"  {name}: {before.get(name, 0) / tot_b * 100:4.0f}% -> "
+            f"{after.get(name, 0) / tot_a * 100:4.0f}%"
+        )
+    logger.info(
+        f"reassignment stats: {stats['n_confident']} confident, "
+        f"{stats['n_keep_unregistered']} kept (unenrolled), "
+        f"{stats['n_keep_toolong']} kept (too long), {stats['n_smooth']} smoothed "
+        f"(of {stats['n_total']})"
+    )
+
+    return merged, info
+
+
+def run_diarization(
+    input_path: str,
+    stt_backend: STTBackend,
+    language: str,
+    speaker_db: SpeakerDB,
+    model_dir: Path,
+    hf_token: str,
+    glossary_path: Path | None = None,
+    num_speakers: int | None = None,
+    default_speakers: int | None = None,
+    identify: bool = True,
+    keep_audio: bool = False,
+) -> dict:
+    """Full diarization for one file or chunk directory.
+
+    Outputs next to the input (file: <stem>_ prefix; directory: inside it):
+      <prefix>transcript_diarized.jsonl   segment records
+      <prefix>transcript_diarized.txt     "[  12.3s] Name: text" script
+      <prefix>speakers.json               per-speaker stats summary
+
+    Speaker-count priority: num_speakers argument > spoken cue in the first
+    90 seconds ("참석자 다섯 명" / "five participants") > default_speakers
+    (None = let pyannote estimate). Returns the speakers.json dict with an
+    extra "txt_path"/"jsonl_path" for callers.
+    """
+    if os.path.isfile(input_path):
+        session = os.path.dirname(os.path.abspath(input_path)) or "."
+        prefix = os.path.splitext(os.path.basename(input_path))[0] + "_"
+    else:
+        session = input_path
+        prefix = ""
+
+    t0 = time.time()
+    logger.info("preparing audio…")
+    audio = prepare_audio(input_path, session)
+    logger.info(f"  audio ready in {time.time() - t0:.0f}s")
+
+    initial_prompt = load_initial_prompt(glossary_path) if glossary_path else None
+    if initial_prompt:
+        logger.info(f"glossary prompt active ({len(initial_prompt)} chars)")
+
+    if num_speakers is not None:
+        num_spk = num_speakers or None  # 0 -> None (pyannote auto)
+        logger.info(f"speaker count: {num_spk or 'auto'} (explicit)")
+    else:
+        th = time.time()
+        head_wav = os.path.join(session, f"_diarize_head_{PID}.wav")
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", "-i", audio,
+                 "-t", str(HEAD_WINDOW_SEC), "-c", "copy", head_wav],
+                check=True,
+            )
+            head_segs = transcribe_segments(stt_backend, head_wav, language, initial_prompt)
+        finally:
+            try:
+                os.remove(head_wav)
+            except OSError:
+                pass
+        detected = detect_num_speakers(language, head_segs, window_sec=HEAD_WINDOW_SEC)
+        logger.info(f"  head transcription for spoken cue took {time.time() - th:.0f}s")
+        if detected:
+            num_spk = detected
+            logger.info(f"speaker count: {num_spk} (spoken cue — override with --speakers if wrong)")
+        else:
+            num_spk = default_speakers or None
+            logger.info(
+                f"no spoken cue -> {'default ' + str(num_spk) if num_spk else 'pyannote auto-estimate'}"
+                " (saying the attendee count at the start of the recording is more reliable)"
+            )
+
+    # whisper and pyannote are independent until the merge step — run them in
+    # parallel. They share the GPU, so each is slower than solo, but the total
+    # beats sequential.
+    t1 = time.time()
+    logger.info(f"transcription ∥ diarization starting (speakers={num_spk or 'auto'})")
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _timed_diarize():
+        td = time.time()
+        r = diarize_turns(audio, hf_token, num_speakers=num_spk)
+        logger.info(f"  pyannote took {time.time() - td:.0f}s (inside parallel window)")
+        return r
+
+    ex = ThreadPoolExecutor(max_workers=1)
+    fut = ex.submit(_timed_diarize)
+    try:
+        segs = transcribe_segments(stt_backend, audio, language, initial_prompt)
+        logger.info(f"  whisper: {len(segs)} segments ({time.time() - t1:.0f}s)")
+        turns = fut.result()
+    except Exception:
+        # If whisper fails, don't wait for pyannote — propagate fast so the
+        # caller can quarantine the file.
+        ex.shutdown(wait=False, cancel_futures=True)
+        raise
+    ex.shutdown(wait=True)
+    n_clusters = len({s for *_, s in turns})
+    logger.info(f"  pyannote: {n_clusters} speaker clusters ({time.time() - t1:.0f}s parallel window)")
+
+    merged = []
+    for st, en, txt in segs:
+        spk = speaker_at(turns, (st + en) / 2)
+        merged.append({"start": round(st, 1), "end": round(en, 1), "speaker": spk, "text": txt})
+    # Snapshot raw cluster labels (index-aligned with merged) BEFORE renaming,
+    # so merge detection still knows each segment's original cluster.
+    raw_labels = [m["speaker"] for m in merged]
+
+    id_mapping: dict = {}
+    id_sims: dict = {}
+    merge_info: dict = {"triggered": False, "suspects": {}, "anchors": [], "stats": {}}
+    if identify:
+        from .speakers.embed import load_wav_mono16k
+
+        wav = sr = None
+        t3 = time.time()
+        db = speaker_db.load_all_embeddings()
+        if not db:
+            logger.info("fingerprint DB empty — skipping identification")
+        else:
+            try:
+                # Identification failing must never kill transcription — absorb
+                # and continue with SPEAKER_NN labels.
+                wav = load_wav_mono16k(audio)
+                sr = 16000
+                merged, id_mapping, id_sims = identify_speakers(wav, sr, merged, db, model_dir)
+            except Exception as e:  # noqa: BLE001 — pipeline must finish
+                logger.warning(f"identification failed — keeping SPEAKER_NN labels: {e}")
+        logger.info(f"  identification took {time.time() - t3:.0f}s")
+
+        if id_mapping:
+            t4 = time.time()
+            try:
+                merged, merge_info = detect_and_fix_merged_speakers(
+                    wav, sr, merged, raw_labels, id_mapping, db, model_dir
+                )
+            except Exception as e:  # noqa: BLE001 — pipeline must finish
+                logger.warning(f"merge detection failed — keeping labels: {e}")
+            status = "merge detection (triggered)" if merge_info.get("triggered") else "merge detection (clean)"
+            logger.info(f"  {status} took {time.time() - t4:.0f}s")
+    else:
+        logger.info("identification disabled (merge detection skipped too)")
+
+    talk: Counter = Counter()
+    for m in merged:
+        talk[m["speaker"]] += m["end"] - m["start"]
+
+    out_jsonl = os.path.join(session, prefix + "transcript_diarized.jsonl")
+    out_txt = os.path.join(session, prefix + "transcript_diarized.txt")
+    with open(out_jsonl, "w", encoding="utf-8") as f:
+        for m in merged:
+            f.write(json.dumps(m, ensure_ascii=False) + "\n")
+    with open(out_txt, "w", encoding="utf-8") as f:
+        for m in merged:
+            f.write(f"[{m['start']:>6.1f}s] {m['speaker']}: {m['text']}\n")
+
+    total_talk = sum(talk.values()) or 1.0
+    raw_of = {v: k for k, v in id_mapping.items()}
+    # "identified" = the final label is a real enrolled name. After a merge
+    # reassignment, a speaker can carry a real name via the anchor set even
+    # though cluster-mean matching (id_mapping) never saw them.
+    identified_names = set(id_mapping.values()) | set(merge_info.get("anchors", []))
+    speakers_data = []
+    for spk, t_sec in talk.most_common():
+        entry = {
+            "label": spk,
+            "talk_sec": round(t_sec, 1),
+            "share": round(t_sec / total_talk, 2),
+            "identified": spk in identified_names,
+        }
+        raw_label = raw_of.get(spk)
+        if raw_label:
+            entry["raw_speaker"] = raw_label
+            scored = id_sims.get(raw_label, [])
+            if scored:
+                entry["match_score"] = round(scored[0][1], 3)
+        speakers_data.append(entry)
+
+    speakers_json: dict = {
+        "n_speakers": len(speakers_data),
+        "speakers": speakers_data,
+    }
+    if merge_info.get("triggered"):
+        speakers_json["merge_reassign"] = {
+            "method": f"enrollment_reassign(ECAPA argmax, margin>={REASSIGN_MARGIN_MIN})",
+            "anchors": merge_info["anchors"],
+            "suspects": merge_info["suspects"],
+            "stats": merge_info["stats"],
+        }
+    out_speakers = os.path.join(session, prefix + "speakers.json")
+    with open(out_speakers, "w", encoding="utf-8") as f:
+        json.dump(speakers_json, f, ensure_ascii=False, indent=2)
+    logger.info(f"speakers.json -> {out_speakers}")
+    logger.info(f"done -> {out_txt} ({time.time() - t0:.0f}s total)")
+
+    if not keep_audio:
+        for f in (audio, os.path.join(session, f"_concat_list_{PID}.txt")):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+
+    speakers_json["txt_path"] = out_txt
+    speakers_json["jsonl_path"] = out_jsonl
+    speakers_json["stats_path"] = out_speakers
+    return speakers_json

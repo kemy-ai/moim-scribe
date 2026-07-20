@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "moim-scribe"
+version = "0.1.0"
+description = "Local voice pipeline for recurring meetings: watch a folder, diarize with accumulating voice fingerprints, and summarize with per-group templates"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors = [{ name = "kemy-ai" }]
+keywords = [
+    "speaker-diarization",
+    "whisper",
+    "pyannote",
+    "meeting-notes",
+    "transcription",
+    "voice-fingerprint",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+dependencies = [
+    "numpy",
+    "soundfile",
+    "pyannote.audio>=4.0",
+    "speechbrain>=1.0",
+    "watchdog>=4.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+mlx = ["mlx-whisper>=0.4"]           # Apple Silicon STT backend (fastest on M-series)
+cross = ["faster-whisper>=1.0"]      # cross-platform STT backend (Windows / Linux / Intel Mac)
+dev = ["pytest>=8.0", "ruff>=0.4"]
+
+[project.urls]
+Repository = "https://github.com/kemy-ai/moim-scribe"
+
+[project.scripts]
+moim-scribe = "moim_scribe.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/moim_scribe"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
