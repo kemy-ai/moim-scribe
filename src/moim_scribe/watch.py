@@ -29,7 +29,13 @@ class _AudioEventHandler(FileSystemEventHandler):
         path = getattr(event, "dest_path", "") or getattr(event, "src_path", "")
         if isinstance(path, bytes):
             path = path.decode(errors="ignore")
-        if path.lower().endswith(AUDIO_EXTS):
+        # Wake on known audio extensions, and also on names carrying no
+        # extension at all — a stripped extension is precisely the case an
+        # extension filter cannot see, and classify_audio() in the scan makes
+        # the real decision. The 60s fallback scan would find it regardless;
+        # this keeps the response immediate.
+        name = path.replace("\\", "/").rsplit("/", 1)[-1]
+        if path.lower().endswith(AUDIO_EXTS) or "." not in name:
             self.wake.set()
 
 

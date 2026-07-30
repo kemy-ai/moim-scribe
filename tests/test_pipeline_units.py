@@ -24,6 +24,27 @@ def test_strip_preamble_no_heading_keeps_everything():
     assert _strip_preamble(prose) == prose
 
 
+def test_strip_preamble_recovers_a_heading_fused_with_noise():
+    """Observed shape: wrapper output lands on the heading's own line.
+
+    Skipping that line would drop the H1 and leave the deliverable starting at
+    an H2 — worse than the noise it was trying to remove.
+    """
+    fused = "Kim Wo# Minutes — topic\n\n## Overview\nbody"
+    assert _strip_preamble(fused) == "# Minutes — topic\n\n## Overview\nbody"
+
+
+def test_strip_preamble_leaves_prose_hash_alone():
+    """"#" without a following space is not a heading marker — e.g. "see #1"."""
+    prose = "see #1 for context\nmore text\n# Real title\nbody"
+    assert _strip_preamble(prose) == "# Real title\nbody"
+
+
+def test_strip_preamble_only_repairs_the_first_line():
+    later = "banner line\nissue #2 mentioned here\n# Real title\nbody"
+    assert _strip_preamble(later) == "# Real title\nbody"
+
+
 def test_ko_filename_hint_and_strip():
     n, title = filename_speaker_hint("북클럽 5명", "ko")
     assert n == 5 and title == "북클럽"
@@ -57,9 +78,22 @@ def test_hint_only_filename_gets_placeholder_title():
 
 def test_prompt_headers_have_both_languages():
     for lang in ("ko", "en"):
-        assert {"rec_info", "rec_line", "spk_stats", "spk_fixed", "transcript"} <= set(
-            PROMPT_HEADERS[lang]
-        )
+        assert {
+            "rec_title", "rec_info", "rec_line", "spk_stats", "spk_fixed", "transcript",
+        } <= set(PROMPT_HEADERS[lang])
+
+
+def test_rec_title_header_carries_the_title_but_warns_against_copying_it():
+    """The filename outranks transcription for people's names — it is not the H1.
+
+    Without the second half of that sentence in the prompt, the deliverable
+    tends to adopt the filename as its own heading.
+    """
+    for lang in ("ko", "en"):
+        block = PROMPT_HEADERS[lang]["rec_title"].format(title="wine chat - Jeong Yujin")
+        assert "wine chat - Jeong Yujin" in block
+        assert "{title}" not in block
+        assert len(block.splitlines()) >= 3  # header, the value, the do-not-copy note
 
 
 def test_lock_basic_cycle(tmp_path):

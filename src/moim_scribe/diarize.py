@@ -17,6 +17,7 @@ import glob
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from collections import Counter
@@ -47,10 +48,32 @@ DEDUPE_KEEP = 2
 DEDUPE_UNIFORM_TOL_SEC = 0.15
 DEDUPE_UNIFORM_KEEP = 1
 
+# Repetition *inside* one segment — a separate axis from the run collapse above,
+# which only sees consecutive identical segments and lets a character-level loop
+# within a single segment pass straight through. One real recording carried a
+# 669-character run of the same 3-letter fragment inside one segment, which then
+# skewed that speaker's label, their talk share, and the summary built on top.
+# Regression-checked over 12 recordings / 26,905 lines: 37 lines (0.14%) changed,
+# every one of them a hallucinated run, no false positives.
+INTRA_REPEAT_MIN = 8         # the unit must repeat 8+ times ("yeah yeah yeah yeah" survives)
+INTRA_REPEAT_UNIT_MAX = 20   # longest repeating unit considered, so sentence-level loops count
+INTRA_REPEAT_DROP_LEN = 40   # runs at least this long are dropped whole; shorter ones collapse
+                             # to a single unit, which keeps real laughter and interjections
+
 IDENTIFY_THRESHOLD = 0.6  # cosine similarity for cluster-mean identification.
-# Measured separation: true matches (cross-recording) 0.91-0.96, best false
-# match of a non-enrolled voice 0.49 — 0.6 splits these safely. Re-validate
-# if the enrolled population grows a lot.
+# Originally measured as a clean split: true matches (cross-recording) 0.91-0.96,
+# best false match of a non-enrolled voice 0.49.
+# 🔴 Later re-measurement on a larger enrolment DB contradicted that split. False
+# matches climbed to 0.593, then 0.637 and 0.646, while the lowest *correct*
+# confident match sat at 0.632 — genuine and spurious had inverted, so no value
+# of this threshold separates them any more. Raising it to stop the false ones
+# also kills true ones.
+# Read this as: the number is safe for a small enrolment DB and degrades as that
+# DB grows, because an unenrolled voice's nearest neighbour gets closer with
+# every person added. It is not a guarantee, and a score alone cannot be a
+# guarantee. Narrowing the candidate set (comparing against who is actually
+# present rather than everyone enrolled) is the axis that still works; this
+# project does not implement it yet.
 IDENTIFY_MAX_SEGMENTS = 40  # embed only the N longest ranges per cluster (efficiency)
 
 # Merge detection & enrollment-based reassignment. When pyannote fuses two
@@ -76,7 +99,16 @@ REASSIGN_UNKNOWN_THRESHOLD = 0.20  # below this best-similarity a segment is
 # single noisy segments and under-restored the merged speaker; 0.20 matched
 # an independently verified reference share almost exactly.
 REASSIGN_MARGIN_MIN = 0.05  # if best-vs-second similarity margin is smaller,
-# the segment is ambiguous — inherit the neighboring confident label instead
+# the segment is ambiguous — inherit the neighboring confident label instead.
+# 🔴 Note what this margin structurally cannot say. It compares anchors against
+# each other, so it can decide "which of these two" but never "neither of them".
+# Together with the 0.20 floor above, the pass therefore assigns *some* anchor to
+# every segment that clears the floor. Where all anchors really were in the room
+# that is the intent. Where one was absent, an unenrolled attendee's speech is
+# handed to that absent person's name wholesale — and the "at least 2 anchors"
+# gate below does not catch it, because two anchors is precisely that case.
+# Measurement has twice shown there is no fix on the score axis (see
+# MERGE_WINNER_MIN_AVG_SIM). The remaining axis is knowing who attended.
 REASSIGN_SMOOTH_MAX_SEC = 3.0  # absorb isolated one-offs (A B A -> A A A) under this length
 
 MERGE_WINNER_MIN_AVG_SIM = 0.28  # a merge "winner" needs not just share but
@@ -86,8 +118,15 @@ MERGE_WINNER_MIN_AVG_SIM = 0.28  # a merge "winner" needs not just share but
 # and promote a non-attendee into the reassignment anchor set (local error
 # becoming global contamination). Swept 0.20-0.32 on real merges: genuine
 # merge parties averaged 0.32-0.35 (full-sweep averages run lower than
-# longest-40 averages), non-attendees 0.22-0.30 — 0.28 keeps the former and
-# is a second line of defense against the latter (share filter is the first).
+# longest-40 averages), non-attendees 0.22-0.30 — 0.28 was chosen to keep the
+# former and screen the latter (the share filter being the first line).
+# 🔴 A later incident contradicted that separation: genuine anchors measured
+# 0.382-0.474 and spurious ones 0.383-0.428 — overlapping, so no threshold on
+# this axis tells them apart. Treat 0.28 as a share-filter companion that
+# removes obvious noise, not as a guard against a non-attendee becoming an
+# anchor. Upstream responded by suspending automatic reassignment when the
+# attendee list is unknown; this project has no attendee-list concept, so the
+# exposure remains and is documented rather than claimed to be solved.
 
 
 def get_hf_token(data_dir: Path, arg_token: str | None = None) -> str:
@@ -153,7 +192,7 @@ def load_initial_prompt(glossary_path: Path) -> str | None:
         text = glossary_path.read_text(encoding="utf-8").strip()
         return text or None
     except Exception as e:  # noqa: BLE001 — auxiliary feature, degrade silently
-        logger.warning(f"glossary unreadable, continuing without prompt: {e}")
+        logger.warning(f"glossary unreadable, continuing without prompt: {type(e).__name__}: {e}")
         return None
 
 
@@ -195,10 +234,42 @@ def dedupe_repeated_segments(
     return out, n_removed
 
 
+INTRA_REPEAT_RE = re.compile(r"(.{1,%d}?)\1{%d,}" % (INTRA_REPEAT_UNIT_MAX, INTRA_REPEAT_MIN - 1))
+
+
+def strip_intra_repeat(text: str, drop_len: int = INTRA_REPEAT_DROP_LEN) -> str:
+    """Clean a short-unit repetition loop from *within* one segment's text.
+
+    A run at least drop_len long is treated as hallucination and dropped; a
+    shorter one collapses to a single unit, since it may well be real laughter
+    or an interjection. Fewer than INTRA_REPEAT_MIN repeats is left alone.
+    """
+    def repl(m: re.Match) -> str:
+        return "" if len(m.group(0)) >= drop_len else m.group(1)
+
+    return INTRA_REPEAT_RE.sub(repl, text).strip()
+
+
+def strip_intra_repeats(segs: list[Segment]) -> tuple[list[Segment], int]:
+    """Apply strip_intra_repeat across segments, dropping any left empty.
+
+    Pure function: returns (cleaned segments, number of segments dropped).
+    """
+    out: list[Segment] = []
+    n_dropped = 0
+    for s, e, t in segs:
+        c = strip_intra_repeat(t)
+        if c:
+            out.append((s, e, c))
+        else:
+            n_dropped += 1
+    return out, n_dropped
+
+
 def transcribe_segments(
     backend: STTBackend, audio: str, language: str, initial_prompt: str | None = None
 ) -> list[Segment]:
-    """Backend transcription + deterministic repetition-loop collapse."""
+    """Backend transcription + deterministic repetition-loop collapse (two axes)."""
     segs = backend.transcribe(audio, language=language, initial_prompt=initial_prompt)
     deduped, n_removed = dedupe_repeated_segments(segs)
     if n_removed:
@@ -206,7 +277,10 @@ def transcribe_segments(
             f"collapsed whisper repetition loops: {n_removed} segments removed "
             f"({DEDUPE_MIN_REPEAT}+ identical in a row)"
         )
-    return deduped
+    cleaned, n_intra = strip_intra_repeats(deduped)
+    if n_intra:
+        logger.info(f"dropped {n_intra} segments that were nothing but an in-segment repeat loop")
+    return cleaned
 
 
 def diarize_turns(audio: str, token: str, num_speakers: int | None) -> list[tuple[float, float, str]]:
@@ -267,7 +341,10 @@ def identify_speakers(
         by_speaker.setdefault(m["speaker"], []).append((m["start"], m["end"]))
 
     logger.info(
-        f"identifying speakers… ({len(db_embeddings)} enrolled: {', '.join(db_embeddings)})"
+        # Count, not the roll call. These are the names of everyone whose voice
+        # is enrolled, most of whom have nothing to do with this recording, and
+        # a log file outlives the run and gets pasted into bug reports.
+        f"identifying speakers… ({len(db_embeddings)} enrolled)"
     )
 
     mapping: dict[str, str] = {}
@@ -523,7 +600,10 @@ def detect_and_fix_merged_speakers(
 
     info["anchors"] = sorted(anchor_names)
     logger.info(
-        f"enrollment reassignment triggered — anchors: {', '.join(info['anchors'])} "
+        # Count, not names. The anchor set is assembled by comparing against the
+        # whole enrolment DB, so it can list people who were never in this
+        # recording — the worst names to leave sitting in a log.
+        f"enrollment reassignment triggered — {len(info['anchors'])} anchors "
         f"(re-checking all {len(merged)} segments)"
     )
 
@@ -556,6 +636,90 @@ def detect_and_fix_merged_speakers(
     )
 
     return merged, info
+
+
+def write_outputs(
+    session: str,
+    prefix: str,
+    merged: list[dict],
+    id_mapping: dict,
+    id_sims: dict,
+    merge_info: dict,
+) -> tuple[str, str, str, dict]:
+    """Write the three-file output contract and return it.
+
+    The single definition of the output schema: every engine funnels through
+    here and nothing else writes these files. Deliberately free of run-specific
+    state (timings, temp-file cleanup) so it can be driven from a plain fixture
+    with neither whisper nor pyannote installed.
+
+    Returns (jsonl_path, txt_path, speakers_path, speakers_json). The caller
+    attaches the *_path keys onto that dict; this function does not, so the
+    schema it owns stays free of local filesystem paths — the dict travels into
+    summarizer prompts, and a home directory is user-identifying.
+    """
+    talk: Counter = Counter()
+    for m in merged:
+        talk[m["speaker"]] += m["end"] - m["start"]
+
+    out_jsonl = os.path.join(session, prefix + "transcript_diarized.jsonl")
+    out_txt = os.path.join(session, prefix + "transcript_diarized.txt")
+    with open(out_jsonl, "w", encoding="utf-8") as f:
+        for m in merged:
+            f.write(json.dumps(m, ensure_ascii=False) + "\n")
+    with open(out_txt, "w", encoding="utf-8") as f:
+        for m in merged:
+            f.write(f"[{m['start']:>6.1f}s] {m['speaker']}: {m['text']}\n")
+
+    total_talk = sum(talk.values()) or 1.0
+    raw_of = {v: k for k, v in id_mapping.items()}
+    # "identified" = the final label is a real enrolled name. After a merge
+    # reassignment, a speaker can carry a real name via the anchor set even
+    # though cluster-mean matching (id_mapping) never saw them.
+    identified_names = set(id_mapping.values()) | set(merge_info.get("anchors", []))
+    speakers_data = []
+    for spk, t_sec in talk.most_common():
+        entry = {
+            "label": spk,
+            "talk_sec": round(t_sec, 1),
+            "share": round(t_sec / total_talk, 2),
+            "identified": spk in identified_names,
+        }
+        raw_label = raw_of.get(spk)
+        if raw_label:
+            entry["raw_speaker"] = raw_label
+            scored = id_sims.get(raw_label, [])
+            if scored:
+                entry["match_score"] = round(scored[0][1], 3)
+        speakers_data.append(entry)
+
+    speakers_json: dict = {
+        "n_speakers": len(speakers_data),
+        "speakers": speakers_data,
+    }
+    if merge_info.get("triggered"):
+        # An allow-list, not a passthrough: putting a field on merge_info does
+        # NOT surface it here. Adding one means editing this dict too, and then
+        # deciding whether it belongs in a prompt — "anchors" and "suspects" are
+        # built by comparing against the whole enrolment DB, so they can name
+        # people who were not in the room. tests/test_diarize_outputs.py pins
+        # the key set at all three levels (top, speakers[], merge_reassign) so
+        # neither an omission nor an unreviewed addition can be silent.
+        speakers_json["merge_reassign"] = {
+            # Stated rather than implied by the block's presence: this is the one
+            # field here a summarizer prompt may see (speaker_stats keeps it and
+            # drops the rest), and audit tooling filters on it.
+            "triggered": True,
+            "method": f"enrollment_reassign(ECAPA argmax, margin>={REASSIGN_MARGIN_MIN})",
+            "anchors": merge_info["anchors"],
+            "suspects": merge_info["suspects"],
+            "stats": merge_info["stats"],
+        }
+    out_speakers = os.path.join(session, prefix + "speakers.json")
+    with open(out_speakers, "w", encoding="utf-8") as f:
+        json.dump(speakers_json, f, ensure_ascii=False, indent=2)
+    logger.info(f"speakers.json -> {out_speakers}")
+    return out_jsonl, out_txt, out_speakers, speakers_json
 
 
 def run_diarization(
@@ -684,7 +848,7 @@ def run_diarization(
                 sr = 16000
                 merged, id_mapping, id_sims = identify_speakers(wav, sr, merged, db, model_dir)
             except Exception as e:  # noqa: BLE001 — pipeline must finish
-                logger.warning(f"identification failed — keeping SPEAKER_NN labels: {e}")
+                logger.warning(f"identification failed — keeping SPEAKER_NN labels: {type(e).__name__}: {e}")
         logger.info(f"  identification took {time.time() - t3:.0f}s")
 
         if id_mapping:
@@ -694,62 +858,15 @@ def run_diarization(
                     wav, sr, merged, raw_labels, id_mapping, db, model_dir
                 )
             except Exception as e:  # noqa: BLE001 — pipeline must finish
-                logger.warning(f"merge detection failed — keeping labels: {e}")
+                logger.warning(f"merge detection failed — keeping labels: {type(e).__name__}: {e}")
             status = "merge detection (triggered)" if merge_info.get("triggered") else "merge detection (clean)"
             logger.info(f"  {status} took {time.time() - t4:.0f}s")
     else:
         logger.info("identification disabled (merge detection skipped too)")
 
-    talk: Counter = Counter()
-    for m in merged:
-        talk[m["speaker"]] += m["end"] - m["start"]
-
-    out_jsonl = os.path.join(session, prefix + "transcript_diarized.jsonl")
-    out_txt = os.path.join(session, prefix + "transcript_diarized.txt")
-    with open(out_jsonl, "w", encoding="utf-8") as f:
-        for m in merged:
-            f.write(json.dumps(m, ensure_ascii=False) + "\n")
-    with open(out_txt, "w", encoding="utf-8") as f:
-        for m in merged:
-            f.write(f"[{m['start']:>6.1f}s] {m['speaker']}: {m['text']}\n")
-
-    total_talk = sum(talk.values()) or 1.0
-    raw_of = {v: k for k, v in id_mapping.items()}
-    # "identified" = the final label is a real enrolled name. After a merge
-    # reassignment, a speaker can carry a real name via the anchor set even
-    # though cluster-mean matching (id_mapping) never saw them.
-    identified_names = set(id_mapping.values()) | set(merge_info.get("anchors", []))
-    speakers_data = []
-    for spk, t_sec in talk.most_common():
-        entry = {
-            "label": spk,
-            "talk_sec": round(t_sec, 1),
-            "share": round(t_sec / total_talk, 2),
-            "identified": spk in identified_names,
-        }
-        raw_label = raw_of.get(spk)
-        if raw_label:
-            entry["raw_speaker"] = raw_label
-            scored = id_sims.get(raw_label, [])
-            if scored:
-                entry["match_score"] = round(scored[0][1], 3)
-        speakers_data.append(entry)
-
-    speakers_json: dict = {
-        "n_speakers": len(speakers_data),
-        "speakers": speakers_data,
-    }
-    if merge_info.get("triggered"):
-        speakers_json["merge_reassign"] = {
-            "method": f"enrollment_reassign(ECAPA argmax, margin>={REASSIGN_MARGIN_MIN})",
-            "anchors": merge_info["anchors"],
-            "suspects": merge_info["suspects"],
-            "stats": merge_info["stats"],
-        }
-    out_speakers = os.path.join(session, prefix + "speakers.json")
-    with open(out_speakers, "w", encoding="utf-8") as f:
-        json.dump(speakers_json, f, ensure_ascii=False, indent=2)
-    logger.info(f"speakers.json -> {out_speakers}")
+    out_jsonl, out_txt, out_speakers, speakers_json = write_outputs(
+        session, prefix, merged, id_mapping, id_sims, merge_info
+    )
     logger.info(f"done -> {out_txt} ({time.time() - t0:.0f}s total)")
 
     if not keep_audio:

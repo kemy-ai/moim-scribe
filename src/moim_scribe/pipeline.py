@@ -26,6 +26,7 @@ from pathlib import Path
 from .config import AUDIO_EXTS, Config
 from .diarize import get_hf_token, run_diarization
 from .packs import build_block, save_card
+from .speaker_stats import render_speaker_stats_block
 from .speakers.db import SpeakerDB
 from .stt import get_backend
 from .summarize import get_summarizer
@@ -34,9 +35,16 @@ logger = logging.getLogger("moim_scribe.pipeline")
 
 MIN_FILE_BYTES = 10_000
 STABILIZE_WAIT_SEC = 3.0
+PREFETCH_CHUNK_BYTES = 1 << 20
+PREFETCH_SLOW_SEC = 5.0  # above this, say so: the whole pass was held meanwhile
 
 PROMPT_HEADERS = {
     "ko": {
+        "rec_title": (
+            "=== 녹음 제목 (저장할 때 붙인 이름 — 사람 이름은 전사 인식보다 이쪽이 정본) ===\n"
+            "{title}\n"
+            "※ 산출물의 제목(H1)은 렌즈 지시대로 따로 만든다. 이 값을 그대로 제목으로 쓰라는 뜻이 아니다."
+        ),
         "rec_info": "=== 녹음 정보 (메타데이터 실측) ===",
         "rec_line": "녹음 일시: {dt}  ※ 정리의 '일시'에 이 값을 쓸 것(전사에 별도 날짜 언급이 없으면)",
         "spk_stats": "=== 화자 통계 (diarize 실측 — 참석 인원·발화 비율은 이 데이터 기준) ===",
@@ -44,6 +52,11 @@ PROMPT_HEADERS = {
         "transcript": "=== 전사본 ===",
     },
     "en": {
+        "rec_title": (
+            "=== Recording title (the name given at save time — for people's names, trust this over the transcript) ===\n"
+            "{title}\n"
+            "Note: build the deliverable's own H1 as the lens instructs; this is context, not the title to copy."
+        ),
         "rec_info": "=== Recording info (from file metadata) ===",
         "rec_line": "Recorded at: {dt}  (use this for the summary's date unless the transcript says otherwise)",
         "spk_stats": "=== Speaker stats (measured — use these for attendee count and talk shares) ===",
@@ -52,6 +65,7 @@ PROMPT_HEADERS = {
     },
 }
 
+_HEADING_MARKER = re.compile(r"#{1,6}\s")
 _KO_FILENAME_COUNT = re.compile(r"([0-9]+)\s*[명인]")
 _EN_FILENAME_COUNT = re.compile(r"\b([0-9]+)\s*(?:p|ppl|people|speakers?)\b", re.IGNORECASE)
 
@@ -133,7 +147,91 @@ def _strip_preamble(summary: str) -> str:
     for i, line in enumerate(lines):
         if line.lstrip().startswith("#"):
             return "\n".join(lines[i:])
+        # Noise can also bleed into the heading's own line instead of sitting on
+        # its own ("<junk># Minutes — topic"). Skipping such a line loses the
+        # title outright: the next heading found is an H2, so the deliverable
+        # arrives with no H1 at all. Cutting at the marker recovers it.
+        # First line only, and only where a real heading marker follows (a
+        # "#" with whitespace after it), so prose like "see #1" is left alone.
+        if i == 0:
+            m = _HEADING_MARKER.search(line)
+            if m and m.start() > 0:
+                return "\n".join([line[m.start():]] + lines[1:])
     return summary
+
+
+def classify_audio(path: Path) -> bool:
+    """Decide whether a file in an inbox folder is audio we should process.
+
+    Filtering by extension alone has a failure mode worse than skipping: a file
+    whose extension got stripped never enters the candidate list, so there is no
+    SKIP line, no error, nothing — the pipeline does not know it exists.
+    Upstream that left a recording sitting unprocessed for hours. So the scan
+    walks everything in the folder and this gate decides:
+
+      - a known extension passes with no probe at all (normal runs cost nothing)
+      - empty files are out
+      - anything else is probed for an audio stream, so notes, images and our
+        own .txt/.json outputs fall out quietly
+      - a cloud placeholder fails the probe and gets picked up on a later pass,
+        which is a delay, not the permanent silence above
+    """
+    if path.suffix.lower() in AUDIO_EXTS:
+        return True
+    try:
+        if path.stat().st_size == 0:
+            return False
+    except OSError:
+        return False
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if probe.returncode == 0 and probe.stdout.strip() == "audio":
+        # This log line is the reason the function exists: the user has to learn
+        # that an extension went missing, or it happens again.
+        logger.info(f"audio with no usable extension — processing anyway: {path.name}")
+        return True
+    return False
+
+
+def _prefetch(path: Path) -> None:
+    """Make a cloud-sync provider materialize an online-only placeholder.
+
+    Google Drive, iCloud and Dropbox keep "online-only" files as stubs whose
+    metadata already looks complete. Reading the bytes is what triggers the
+    actual download. Without that, the stub's size is stable on every pass and
+    the decode probe below keeps failing — so the file is skipped forever rather
+    than fetched, and nothing in the log says why.
+
+    🔴 This blocks until the download finishes, and scan_inbox holds
+    PipelineLock for the entire pass, so a large placeholder stalls the whole
+    pipeline for that long. Accepted because the alternative is never processing
+    the recording at all — but it is why a slow prefetch is logged rather than
+    passing silently.
+
+    Reads in chunks and discards them, so memory stays flat regardless of size.
+    """
+    t0 = time.time()
+    try:
+        with path.open("rb") as fh:
+            while fh.read(PREFETCH_CHUNK_BYTES):
+                pass
+    except OSError as e:
+        # Not fatal: the checks below decide. A stub that cannot be read yet just
+        # gets skipped this pass, exactly as before.
+        logger.info(f"prefetch skipped ({type(e).__name__}) — continuing: {path.name}")
+        return
+    elapsed = time.time() - t0
+    if elapsed > PREFETCH_SLOW_SEC:
+        logger.info(
+            f"prefetch of {path.name} took {elapsed:.0f}s (cloud download) — "
+            "the pipeline was held for that time"
+        )
 
 
 def is_stable_audio(path: Path) -> bool:
@@ -142,6 +240,7 @@ def is_stable_audio(path: Path) -> bool:
     Cloud placeholders report a final size while content is still syncing,
     so a metadata check is not enough — the file must actually decode.
     """
+    _prefetch(path)
     try:
         s1 = path.stat().st_size
     except OSError:
@@ -171,7 +270,10 @@ def quarantine_leftovers(cfg: Config) -> None:
     automatic retry loop would burn the machine on a poison file.
     """
     for f in sorted(cfg.processing_dir.iterdir()) if cfg.processing_dir.exists() else []:
-        if not f.is_file() or f.suffix.lower() not in AUDIO_EXTS:
+        # Same gate as the inbox scan: a claimed file whose extension was
+        # stripped would otherwise be invisible here too, and stay in
+        # _processing forever with nothing logged.
+        if not f.is_file() or not classify_audio(f):
             continue
         stem = f.stem
         for junk in cfg.processing_dir.glob(f"{stem}_transcript_diarized.*"):
@@ -229,16 +331,33 @@ def process_recording(cfg: Config, claimed: Path, type_folder: str) -> Path:
     h = _headers(cfg.language)
     rec_info = _recording_time_block(claimed, cfg.language)
     stats_path = Path(result["stats_path"])
+    # Filtered, never the raw file: some fields in speakers.json are diagnostics
+    # that can name people who were not in the room, and the header right above
+    # this block tells the model the attendee list comes from here.
+    rendered_stats = render_speaker_stats_block(stats_path) if stats_path.exists() else ""
     spk_stats = ""
-    if stats_path.exists():
-        spk_stats = f"{h['spk_stats']}\n{stats_path.read_text(encoding='utf-8')}\n"
+    if rendered_stats:
+        spk_stats = f"{h['spk_stats']}\n{rendered_stats}\n"
         if hint:
             spk_stats += h["spk_fixed"].format(n=hint) + "\n"
+    else:
+        # Don't let the omission be silent. Without this block the summary falls
+        # back to inferring the attendee count from the conversation — the one
+        # thing the lens forbids — and the finished output looks entirely normal.
+        logger.warning(
+            "speaker stats block omitted — the summary will have no measured attendee count"
+        )
     ctx_block = build_block(cfg.packs_dir, type_folder, title, cfg.language)
 
+    # The filename is the one name source a human set deliberately, at save
+    # time, so for people's names it beats transcription: a self-introduction
+    # spoken seconds after someone else's gets pulled toward the wrong surname.
+    # Until this block existed the title was computed for pack matching and
+    # then thrown away, so the deliverable had no way to know it.
+    title_block = h["rec_title"].format(title=title) + "\n"
     prompt = (
         f"{_load_common_lens(cfg)}\n{_load_lens(cfg, lens_name)}\n\n"
-        f"{rec_info}{spk_stats}{ctx_block}\n"
+        f"{title_block}{rec_info}{spk_stats}{ctx_block}\n"
         f"{h['transcript']}\n{transcript_path.read_text(encoding='utf-8')}"
     )
 
@@ -342,7 +461,7 @@ def scan_inbox(cfg: Config) -> dict:
             if not folder.is_dir():
                 continue
             for f in sorted(folder.iterdir()):
-                if not f.is_file() or f.suffix.lower() not in AUDIO_EXTS:
+                if not f.is_file() or not classify_audio(f):
                     continue
                 if not is_stable_audio(f):
                     counts["skipped"] += 1
@@ -374,8 +493,14 @@ def scan_inbox(cfg: Config) -> dict:
                     counts["failed"] += 1
                     continue
 
-                # Success: keep speakers.json and the diarized txt in _done —
-                # they are the source for later enrollment and label fixes.
+                # Success: move the txt and speakers.json to _done, drop the
+                # working jsonl. Which file feeds which tool matters here:
+                # `enroll` needs the *jsonl* (segment start/end exist nowhere
+                # else) and process_recording has already copied it into
+                # results/; `verify` and manual label fixes read the txt.
+                # So deleting work_products[0] is safe only because of that
+                # copy — if it ever stops happening, the recording becomes
+                # permanently un-enrollable. Keep the two in sync.
                 work_products[0].unlink(missing_ok=True)
                 for wp in work_products[1:]:
                     if wp.exists():

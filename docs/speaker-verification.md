@@ -4,7 +4,11 @@ These rules were established the hard way — from real mislabeling incidents
 in production use. Follow them and the fingerprint DB stays trustworthy;
 skip them and errors reinforce themselves.
 
-## The four principles
+## The principles
+
+<!-- Deliberately uncounted in the heading. A stated count drifts the moment a
+     principle is added — and it did, across three documents at once. -->
+
 
 1. **Attendee count ≠ cluster count.** One person can span several clusters
    and several people can share one. Never reason "5 attendees, 5 clusters,
