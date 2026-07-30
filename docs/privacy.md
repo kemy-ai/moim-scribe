@@ -6,10 +6,13 @@ moim-scribe exists for one purpose: groups recording **themselves**, with
 everyone's informed consent, to keep better notes of their own meetings.
 
 Do not use it to record people covertly, to identify speakers who have not
-agreed to voice enrollment, or to process recordings you were not a party
-to. Beyond being a violation of this project's intent, covert recording
-and non-consensual biometric identification are criminal or actionable
-offenses in many jurisdictions.
+agreed to voice enrollment, to process recordings you were not a party to,
+or to analyse conversations with a partner or family member without their
+knowledge — a private relationship is where covert recording is most
+tempting and least defensible, which is why the `conversation` example
+opens with that warning rather than burying it. Beyond being a violation
+of this project's intent, covert recording and non-consensual biometric
+identification are criminal or actionable offenses in many jurisdictions.
 
 moim-scribe processes two kinds of highly personal data:
 

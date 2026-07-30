@@ -11,6 +11,11 @@ Three layers decide how a recording becomes notes:
 A type without a lens (`transcript: null` in config.yaml) stops at the
 diarized transcript.
 
+One further lens ships **inactive**: `conversation`, for recurring private
+conversations, where the record is the wording itself rather than decisions or
+per-person catch-up. It is not in the default `types:` — turn it on only after
+reading `packs/conversation/README.md`, which opens with a consent notice.
+
 ## Pack directory anatomy
 
 ```

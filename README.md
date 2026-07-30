@@ -4,7 +4,7 @@
 
 *moim* (모임) is Korean for a small recurring gathering — a book club, a writing circle, a weekly team sync. moim-scribe watches a folder, and when a recording lands in it: transcribes (whisper) → separates speakers (pyannote) → **matches voices against a fingerprint database that grows with every session** → writes structured notes using the template for that type of meeting. Audio, diarization, and voice fingerprints never leave your machine; the final summarization step is your choice — fully local (Ollama, or none) or a cloud LLM (Claude).
 
-> **Consent first.** moim-scribe is built for groups that record themselves with everyone's informed consent. Voice fingerprints are biometric data — never use this tool to record or identify people covertly. In many jurisdictions that is illegal, not just impolite: [docs/privacy.md](docs/privacy.md).
+> **Consent first.** moim-scribe is built for groups that record themselves with everyone's informed consent. Voice fingerprints are biometric data — never use this tool to record or identify people covertly. **This bites hardest in private relationships**: a conversation with a partner or a family member is where one side is most tempted to record without saying so, and precisely where you must not. In many jurisdictions that is illegal, not just impolite: [docs/privacy.md](docs/privacy.md).
 
 [한국어 README](README.ko.md)
 
@@ -80,14 +80,16 @@ Results land in `results/` as `YYMMDD_title_type.md` plus the full diarized tran
 ## Teaching it who's who
 
 ```bash
-# after the first processed session, map labels to names once:
-moim-scribe enroll inbox/_done/rec.m4a inbox/_done/rec_transcript_diarized.jsonl \
+# after the first processed session, map labels to names once.
+# enroll reads the .jsonl (segment start/end live only there) and that file is
+# kept in results/; the original audio lands in inbox/_done/:
+moim-scribe enroll inbox/_done/rec.m4a results/YYMMDD_rec_diarized.jsonl \
     SPEAKER_00="Kim Haneul" SPEAKER_02="Lee Bada" --workspace ~/MyMeetings
 
 moim-scribe speakers ~/MyMeetings      # see accumulated fingerprints
 
-# from now on those two are auto-identified; verify a finished transcript anytime:
-moim-scribe verify rec.m4a rec_transcript_diarized.txt \
+# from now on those two are auto-identified; verify a finished transcript anytime (this one reads the .txt):
+moim-scribe verify inbox/_done/rec.m4a inbox/_done/rec_transcript_diarized.txt \
     --expected "Kim Haneul,Lee Bada,Park Gureum" --workspace ~/MyMeetings
 ```
 

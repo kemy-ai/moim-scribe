@@ -4,7 +4,7 @@
 
 독서모임, 글쓰기 모임, 매주 하는 팀 회의처럼 **같은 멤버가 반복해서 만나는 자리**를 위해 만들었습니다. 지정 폴더를 감시하다가 녹음 파일이 들어오면: 전사(whisper) → 화자분리(pyannote) → **회차마다 쌓이는 음성 지문 DB와 대조해 실명 자동 매칭** → 모임 유형별 양식으로 정리까지. 오디오 처리·화자분리·음성 지문은 내 컴퓨터를 떠나지 않고, 마지막 정리 단계만 선택입니다 — 완전 로컬(Ollama 또는 생략) 또는 클라우드 LLM(Claude).
 
-> **동의가 먼저입니다.** moim-scribe는 참가자 전원의 동의 아래 스스로를 녹음하는 모임을 위해 만들어졌습니다. 음성 지문은 생체정보입니다 — 몰래 녹음하거나 동의 없이 사람을 식별하는 데 절대 쓰지 마세요. 많은 나라에서 이것은 무례가 아니라 불법입니다: [docs/privacy.md](docs/privacy.md)
+> **동의가 먼저입니다.** moim-scribe는 참가자 전원의 동의 아래 스스로를 녹음하는 모임을 위해 만들어졌습니다. 음성 지문은 생체정보입니다 — 몰래 녹음하거나 동의 없이 사람을 식별하는 데 절대 쓰지 마세요. **사적 관계에서 특히 그렇습니다**: 연인·가족과의 대화는 한쪽이 말 없이 녹음할 유인이 가장 큰 경우이고, 그래서 가장 하지 말아야 하는 경우입니다. 많은 나라에서 이것은 무례가 아니라 불법입니다: [docs/privacy.md](docs/privacy.md)
 
 [English README](README.md)
 
@@ -80,14 +80,16 @@ moim-scribe watch ~/MyMeetings         # 1회만 돌리려면 scan-inbox
 ## 누가 누군지 가르치기
 
 ```bash
-# 첫 회차 처리 후, 라벨→이름 매핑을 한 번만:
-moim-scribe enroll inbox/_done/녹음.m4a inbox/_done/녹음_transcript_diarized.jsonl \
+# 첫 회차 처리 후, 라벨→이름 매핑을 한 번만.
+# enroll 이 읽는 것은 .jsonl 입니다(구간 start/end 가 거기에만 있음) — 그 파일은
+# results/ 에 남습니다. 원본 오디오는 inbox/_done/ 으로 들어갑니다:
+moim-scribe enroll inbox/_done/녹음.m4a results/YYMMDD_녹음_diarized.jsonl \
     SPEAKER_00=김하늘 SPEAKER_02=이바다 --workspace ~/MyMeetings
 
 moim-scribe speakers ~/MyMeetings      # 축적된 지문 확인
 
-# 이후 회차부터 자동 식별. 완성 전사는 언제든 검증:
-moim-scribe verify 녹음.m4a 녹음_transcript_diarized.txt \
+# 이후 회차부터 자동 식별. 완성 전사는 언제든 검증(이쪽이 읽는 것은 .txt):
+moim-scribe verify inbox/_done/녹음.m4a inbox/_done/녹음_transcript_diarized.txt \
     --expected "김하늘,이바다,박구름" --workspace ~/MyMeetings
 ```
 

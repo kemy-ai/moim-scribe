@@ -52,9 +52,12 @@ HEADER = {
 }
 
 # Section headers harvested into round cards (whichever exist in the output).
+# A lens whose sections are absent here produces an empty card — the harvest is
+# by header, so adding a lens means adding its carry-forward sections too.
 SECTION_HEADERS = [
     "## 결정사항", "## 할 일", "## 보류·다음 논의", "## 다음 모임",
     "## Decisions", "## Action items", "## Next meeting",
+    "## 합의된 것 · 열린 채로 남은 것", "## Agreed and left open",
 ]
 
 
@@ -80,7 +83,7 @@ def find_matching_pack(packs_dir: Path, type_: str, title: str) -> Path | None:
         try:
             spec = json.loads(match_path.read_text(encoding="utf-8"))
         except Exception as e:  # noqa: BLE001 — one bad pack must not break matching
-            logger.warning(f"match.json unreadable — skipped: {match_path} ({e})")
+            logger.warning(f"match.json unreadable — skipped: {match_path} ({type(e).__name__}: {e})")
             continue
         if not isinstance(spec, dict):
             continue
@@ -111,7 +114,7 @@ def _read_text_safe(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8").strip()
     except Exception as e:  # noqa: BLE001 — one broken file must not break the block
-        logger.warning(f"unreadable — skipped: {path} ({e})")
+        logger.warning(f"unreadable — skipped: {path} ({type(e).__name__}: {e})")
         return ""
 
 
@@ -226,7 +229,7 @@ def build_card(type_: str, title: str, out_md_path: str | Path) -> str:
     try:
         text = Path(out_md_path).read_text(encoding="utf-8")
     except Exception as e:  # noqa: BLE001
-        logger.warning(f"result unreadable — header-only card: {out_md_path} ({e})")
+        logger.warning(f"result unreadable — header-only card: {out_md_path} ({type(e).__name__}: {e})")
         return header + "\n"
 
     sections = _extract_sections(text)
@@ -252,4 +255,4 @@ def save_card(packs_dir: Path, type_: str, title: str, out_md_path: str | Path) 
         dest.write_text(build_card(type_, title, out_md_path), encoding="utf-8")
         logger.info(f"round card saved: {dest}")
     except Exception as e:  # noqa: BLE001 — history is auxiliary, never fatal
-        logger.warning(f"round card save failed (ignored): {e}")
+        logger.warning(f"round card save failed (ignored): {type(e).__name__}: {e}")
