@@ -727,6 +727,69 @@ def write_outputs(
     return out_jsonl, out_txt, out_speakers, speakers_json
 
 
+def identify_and_repair(
+    audio: str,
+    merged: list[dict],
+    raw_labels: list[str],
+    speaker_db: SpeakerDB,
+    model_dir: Path,
+    identify: bool = True,
+) -> tuple[list[dict], dict, dict, dict]:
+    """Put enrolled names on cluster labels, then repair clusters that merged
+    two enrolled people into one.
+
+    Extracted so both diarization paths share it: the local one arrives here
+    with pyannote's SPEAKER_NN labels, the cloud one with the provider's own
+    speaker ids. Neither knows who those labels *are* — that is this function's
+    job, and it depends on nothing about how the labels were produced.
+
+    Every failure here is absorbed. Transcription is the paid, unrepeatable
+    part of the work; naming is an enhancement on top of it, so a broken
+    fingerprint DB or a missing model must degrade to SPEAKER_NN rather than
+    lose the transcript.
+
+    Returns (merged, id_mapping, id_sims, merge_info) — merged is mutated in
+    place by the callees and also returned, matching the previous inline flow.
+    """
+    id_mapping: dict = {}
+    id_sims: dict = {}
+    merge_info: dict = {"triggered": False, "suspects": {}, "anchors": [], "stats": {}}
+    if not identify:
+        logger.info("identification disabled (merge detection skipped too)")
+        return merged, id_mapping, id_sims, merge_info
+
+    from .speakers.embed import load_wav_mono16k
+
+    wav = sr = None
+    t3 = time.time()
+    db = speaker_db.load_all_embeddings()
+    if not db:
+        logger.info("fingerprint DB empty — skipping identification")
+    else:
+        try:
+            # Identification failing must never kill transcription — absorb
+            # and continue with SPEAKER_NN labels.
+            wav = load_wav_mono16k(audio)
+            sr = 16000
+            merged, id_mapping, id_sims = identify_speakers(wav, sr, merged, db, model_dir)
+        except Exception as e:  # noqa: BLE001 — pipeline must finish
+            logger.warning(f"identification failed — keeping SPEAKER_NN labels: {type(e).__name__}: {e}")
+    logger.info(f"  identification took {time.time() - t3:.0f}s")
+
+    if id_mapping:
+        t4 = time.time()
+        try:
+            merged, merge_info = detect_and_fix_merged_speakers(
+                wav, sr, merged, raw_labels, id_mapping, db, model_dir
+            )
+        except Exception as e:  # noqa: BLE001 — pipeline must finish
+            logger.warning(f"merge detection failed — keeping labels: {type(e).__name__}: {e}")
+        status = "merge detection (triggered)" if merge_info.get("triggered") else "merge detection (clean)"
+        logger.info(f"  {status} took {time.time() - t4:.0f}s")
+
+    return merged, id_mapping, id_sims, merge_info
+
+
 def run_diarization(
     input_path: str,
     stt_backend: STTBackend,
@@ -834,40 +897,9 @@ def run_diarization(
     # so merge detection still knows each segment's original cluster.
     raw_labels = [m["speaker"] for m in merged]
 
-    id_mapping: dict = {}
-    id_sims: dict = {}
-    merge_info: dict = {"triggered": False, "suspects": {}, "anchors": [], "stats": {}}
-    if identify:
-        from .speakers.embed import load_wav_mono16k
-
-        wav = sr = None
-        t3 = time.time()
-        db = speaker_db.load_all_embeddings()
-        if not db:
-            logger.info("fingerprint DB empty — skipping identification")
-        else:
-            try:
-                # Identification failing must never kill transcription — absorb
-                # and continue with SPEAKER_NN labels.
-                wav = load_wav_mono16k(audio)
-                sr = 16000
-                merged, id_mapping, id_sims = identify_speakers(wav, sr, merged, db, model_dir)
-            except Exception as e:  # noqa: BLE001 — pipeline must finish
-                logger.warning(f"identification failed — keeping SPEAKER_NN labels: {type(e).__name__}: {e}")
-        logger.info(f"  identification took {time.time() - t3:.0f}s")
-
-        if id_mapping:
-            t4 = time.time()
-            try:
-                merged, merge_info = detect_and_fix_merged_speakers(
-                    wav, sr, merged, raw_labels, id_mapping, db, model_dir
-                )
-            except Exception as e:  # noqa: BLE001 — pipeline must finish
-                logger.warning(f"merge detection failed — keeping labels: {type(e).__name__}: {e}")
-            status = "merge detection (triggered)" if merge_info.get("triggered") else "merge detection (clean)"
-            logger.info(f"  {status} took {time.time() - t4:.0f}s")
-    else:
-        logger.info("identification disabled (merge detection skipped too)")
+    merged, id_mapping, id_sims, merge_info = identify_and_repair(
+        audio, merged, raw_labels, speaker_db, model_dir, identify
+    )
 
     out_jsonl, out_txt, out_speakers, speakers_json = write_outputs(
         session, prefix, merged, id_mapping, id_sims, merge_info
