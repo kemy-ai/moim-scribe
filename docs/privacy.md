@@ -41,12 +41,23 @@ can name speakers automatically — is everyone OK with that?"
 
 ## How the design protects data
 
-- **Local by default.** Transcription, diarization, and fingerprinting run
-  on your machine. After the first model download, the fingerprint model is
-  forced offline (`HF_HUB_OFFLINE`) — processing voices never touches the
-  network. The `ollama`/`none` summarizers make the whole pipeline offline;
-  `claude_cli`/`anthropic_api` send the *transcript* to Anthropic — pick
-  what matches the consent you collected.
+- **Local by default, and the two exceptions are yours to set.**
+  Fingerprinting is always local: after the first model download that model is
+  forced offline (`HF_HUB_OFFLINE`), so matching voices never touches the
+  network. Two other steps can, and neither does unless you configure it:
+  - `stt: soniox` uploads the **audio itself** to Soniox for transcription.
+    moim-scribe deletes the uploaded file and the transcription when it
+    finishes, and logs what to delete by hand if that fails — but the
+    recording was on a third party's servers in the meantime, and their
+    retention is governed by their terms, not this tool's. The default
+    backends (`mlx`, `faster`) keep the audio on your machine.
+  - `claude_cli` / `anthropic_api` send the **transcript** to Anthropic.
+    `ollama` / `none` do not.
+
+  These are independent, so state them separately when you ask for consent:
+  "the recording is uploaded for transcription" is a different thing to agree
+  to than "the transcript is sent to an AI service", and a setup can do
+  either, both, or neither.
 - **Workspace separation.** All personal data (fingerprints in `speakers/`,
   recordings in `inbox/`, rosters in `packs/`) lives in a folder you chose,
   outside any git repository, and `moim-scribe init` writes a defensive

@@ -52,4 +52,14 @@ def get_backend(name: str, model: str | None = None) -> STTBackend:
         from .faster_backend import FasterWhisperBackend
 
         return FasterWhisperBackend(model or DEFAULT_MODELS["faster"])
-    raise ValueError(f"unknown STT backend: {name!r} (expected 'mlx' or 'faster')")
+    if name.strip().lower() == "soniox":
+        # Reachable only from a near-miss spelling, since the real value is
+        # matched before this function is called. Saying so here is what keeps a
+        # typo from quietly transcribing locally under a cloud setting.
+        raise ValueError(
+            "'soniox' is not a whisper backend and is dispatched separately — "
+            f"got {name!r}; write exactly 'soniox' in config.yaml"
+        )
+    raise ValueError(
+        f"unknown STT backend: {name!r} (expected 'mlx', 'faster' or 'soniox')"
+    )

@@ -13,7 +13,23 @@ def test_stt_unknown_backend():
 
 
 def test_stt_defaults_exist():
+    """soniox is deliberately absent: it returns diarized text, which the
+    STTBackend protocol — (start, end, text) — has nowhere to put, so it is
+    dispatched by pipeline.process_recording instead of this factory."""
     assert set(STT_DEFAULTS) == {"mlx", "faster"}
+
+
+def test_soniox_through_the_whisper_factory_explains_itself():
+    """Only reachable from a near-miss spelling, since the real value is matched
+    before get_backend runs. Without this message a typo would transcribe
+    locally under a setting the user believes is sending audio to the cloud."""
+    with pytest.raises(ValueError, match="dispatched separately"):
+        get_backend("Soniox")
+
+
+def test_unknown_backend_message_lists_soniox():
+    with pytest.raises(ValueError, match="soniox"):
+        get_backend("whisperx")
 
 
 def test_summarizer_none_is_none():

@@ -1,8 +1,8 @@
 # moim-scribe
 
-**A local voice pipeline built for recurring meetings — the more often the same people meet, the more accurate it gets.**
+**A local-first voice pipeline built for recurring meetings — the more often the same people meet, the more accurate it gets.**
 
-*moim* (모임) is Korean for a small recurring gathering — a book club, a writing circle, a weekly team sync. moim-scribe watches a folder, and when a recording lands in it: transcribes (whisper) → separates speakers (pyannote) → **matches voices against a fingerprint database that grows with every session** → writes structured notes using the template for that type of meeting. Audio, diarization, and voice fingerprints never leave your machine; the final summarization step is your choice — fully local (Ollama, or none) or a cloud LLM (Claude).
+*moim* (모임) is Korean for a small recurring gathering — a book club, a writing circle, a weekly team sync. moim-scribe watches a folder, and when a recording lands in it: transcribes (whisper) → separates speakers (pyannote) → **matches voices against a fingerprint database that grows with every session** → writes structured notes using the template for that type of meeting. Voice fingerprints are always local. Two steps are yours to choose: transcription runs on your machine by default and can instead go to Soniox, and summarization can be local (Ollama, or none) or a cloud LLM (Claude).
 
 > **Consent first.** moim-scribe is built for groups that record themselves with everyone's informed consent. Voice fingerprints are biometric data — never use this tool to record or identify people covertly. **This bites hardest in private relationships**: a conversation with a partner or a family member is where one side is most tempted to record without saying so, and precisely where you must not. In many jurisdictions that is illegal, not just impolite: [docs/privacy.md](docs/privacy.md).
 
@@ -19,10 +19,11 @@ flowchart TD
         C --> D["results/<br>notes md + diarized transcript"]
         V["enroll · verify commands"] -.-> FP
     end
+    B -.->|"the audio itself, and only<br>with stt: soniox"| STT["Soniox<br>cloud STT"]
     C -.->|"transcript only, and only with a cloud<br>backend (claude_cli · anthropic_api)"| LLM["cloud LLM"]
 ```
 
-Audio, diarization, and fingerprints never cross the dashed line; with the `ollama` or `none` summarizer, nothing does.
+Fingerprints never cross the dashed line. Two things can, each only if you choose it: the audio (`stt: soniox`) and the transcript (a cloud summarizer). With the defaults changed to `soniox` + `none`, the recording leaves and the transcript does not; with `mlx` + `ollama`, nothing leaves at all.
 
 ## Why another whisper + pyannote script?
 
@@ -40,8 +41,21 @@ One-shot diarization scripts treat every recording as a room full of strangers. 
 |---|---|---|
 | macOS (Apple Silicon) | `mlx` (mlx-whisper) | tier 1 — this is the config the pipeline was built and field-tested on |
 | Windows / Linux / Intel Mac | `faster` (faster-whisper) | supported by design, CI-tested at unit level — field reports welcome |
+| any platform | `soniox` (cloud) | no local model, no Hugging Face token — but the audio is uploaded. See below |
 
 pyannote and speechbrain are PyTorch and run everywhere (CUDA, MPS, CPU). The watcher uses `watchdog` (native events on all three OSes).
+
+## Transcription backends
+
+| backend | where it runs | speaker separation | notes |
+|---|---|---|---|
+| `mlx` (default on Apple Silicon) | your machine | pyannote, locally | takes a speaker count from the filename or a spoken cue |
+| `faster` (default elsewhere) | your machine | pyannote, locally | same |
+| `soniox` | Soniox's servers — **the audio is uploaded** | done by Soniox | no pyannote, no Hugging Face token, no model download. Needs an API key and is billed per hour of audio |
+
+`soniox` is worth knowing two things about before choosing it. It is fast and accurate **when people take turns speaking**; on a noisy recording where several people talked over each other, testing found it fusing distinct speakers into one. And it accepts **no speaker count** — diarization is a single on/off switch that detects up to 15 speakers by itself, so a count in the filename is ignored on this path (the log says so when it drops one). A single file is capped at 300 minutes.
+
+Setup and the quota you have to manage: [docs/setup-soniox.md](docs/setup-soniox.md).
 
 ## Install
 
@@ -101,17 +115,17 @@ Only enroll ranges a human has confirmed — the discipline that keeps the datab
 |---|---|---|
 | `claude_cli` (default) | Claude Code installed | yes — sent to Anthropic via your existing login |
 | `anthropic_api` | `ANTHROPIC_API_KEY` | yes — sent to Anthropic's Messages API |
-| `ollama` | Ollama running locally | no — fully offline pipeline |
+| `ollama` | Ollama running locally | no — nothing leaves at this step |
 | `none` | nothing | no — stops at the diarized transcript |
 
-Switch in `config.yaml`. Lenses ship in Korean and English (`--language`).
+Switch in `config.yaml`. Lenses ship in Korean and English (`--language`). This table is about the transcript only — whether the *audio* leaves is the separate `stt` choice above.
 
 ## Privacy and consent — read this
 
 Voice fingerprints are **biometric personal data**, and recordings capture private conversation.
 
 - **Record and enroll only with every participant's consent.** In many jurisdictions this is a legal requirement, not a courtesy — e.g. under Korea's Personal Information Protection Act, voiceprints used to identify a person are sensitive biometric information requiring separate explicit consent.
-- Audio processing, diarization, and fingerprinting stay local; after the first model download the fingerprint step runs offline by design. Only the optional summarization step can send the transcript to a cloud LLM — and you pick that backend.
+- Fingerprinting is always local, and after the first model download that step is forced offline. Two steps can reach the network, and only if you configure them to: `stt: soniox` uploads the **audio**, and a cloud summarizer sends the **transcript**. The defaults keep the audio home.
 - The workspace keeps fingerprints (`speakers/`), recordings, and rosters outside the repo, and `init` drops a defensive `.gitignore` in the workspace. Never publish a workspace.
 
 Details: [docs/privacy.md](docs/privacy.md).

@@ -296,21 +296,40 @@ def process_recording(cfg: Config, claimed: Path, type_folder: str) -> Path:
         + (f", speakers={hint} from filename)" if hint else ")")
     )
 
-    stt = get_backend(cfg.stt_backend, cfg.stt_model)
     db = SpeakerDB(cfg.speakers_dir)
-    token = get_hf_token(cfg.workspace)
 
-    result = run_diarization(
-        str(claimed),
-        stt_backend=stt,
-        language=cfg.language,
-        speaker_db=db,
-        model_dir=cfg.embed_model_dir,
-        hf_token=token,
-        glossary_path=cfg.glossary_path,
-        num_speakers=hint,
-        default_speakers=(cfg.default_speakers or None),
-    )
+    if cfg.stt_backend == "soniox":
+        # 🔴 Everything local-only stays inside this else-branch, get_hf_token
+        # above all. It raises SystemExit, which is a BaseException and so slips
+        # past the `except Exception` in scan_inbox — called unconditionally, a
+        # Soniox user with no Hugging Face token would not get one failed
+        # recording but a dead watch loop.
+        from .diarize_cloud import run_cloud_diarization
+        from .stt.soniox_client import get_api_key
+
+        result = run_cloud_diarization(
+            str(claimed),
+            api_key=get_api_key(cfg.workspace),
+            speaker_db=db,
+            model_dir=cfg.embed_model_dir,
+            region=cfg.soniox_region,
+            glossary_path=cfg.glossary_path,
+            language_hints=[cfg.language],
+            num_speakers=hint,
+        )
+    else:
+        stt = get_backend(cfg.stt_backend, cfg.stt_model)
+        result = run_diarization(
+            str(claimed),
+            stt_backend=stt,
+            language=cfg.language,
+            speaker_db=db,
+            model_dir=cfg.embed_model_dir,
+            hf_token=get_hf_token(cfg.workspace),
+            glossary_path=cfg.glossary_path,
+            num_speakers=hint,
+            default_speakers=(cfg.default_speakers or None),
+        )
     transcript_path = Path(result["txt_path"])
     if not transcript_path.exists() or transcript_path.stat().st_size == 0:
         raise RuntimeError("empty transcript")

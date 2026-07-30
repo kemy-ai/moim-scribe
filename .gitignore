@@ -16,6 +16,7 @@ speakers/
 *.opus
 # Secrets
 .hf_token
+.soniox_key
 .env
 # User data folders (when created inside a repo clone)
 data/

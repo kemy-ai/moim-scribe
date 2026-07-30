@@ -4,6 +4,11 @@ The diarization model is free but *gated*: Hugging Face requires you to
 accept its terms once per account before it can be downloaded. This is the
 single most common place setups fail — do these four steps in order.
 
+> Needed for the local backends (`mlx`, `faster`) only. With
+> `stt_backend: soniox` the speaker split happens server-side, so there is no
+> token and no gated model to accept — at the cost of uploading the recording.
+> See [setup-soniox.md](setup-soniox.md).
+
 1. Create a free account at [huggingface.co](https://huggingface.co).
 2. Open both model pages **and click "Agree and access repository" on each**:
    - <https://huggingface.co/pyannote/speaker-diarization-3.1>

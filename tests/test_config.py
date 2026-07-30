@@ -26,6 +26,27 @@ def test_yaml_overrides(tmp_path):
     assert cfg.types == {"standup": "meeting", "raw": None}
 
 
+def test_soniox_settings_default_to_local_and_us(tmp_path):
+    """The cloud path must never be reachable by omission — a config that says
+    nothing about stt has to keep the audio on the machine."""
+    cfg = load_config(tmp_path)
+    assert cfg.stt_backend != "soniox"
+    assert cfg.soniox_region == "us"
+    assert cfg.soniox_key_path == tmp_path / ".soniox_key"
+
+
+def test_soniox_region_is_read_from_yaml(tmp_path):
+    """🔴 A new field needs both the dataclass attribute and an entry in
+    load_config's key list; with only the attribute it silently keeps its
+    default no matter what the file says."""
+    (tmp_path / "config.yaml").write_text(
+        "stt_backend: soniox\nsoniox_region: eu\n", encoding="utf-8",
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.stt_backend == "soniox"
+    assert cfg.soniox_region == "eu"
+
+
 def test_null_values_keep_defaults(tmp_path):
     (tmp_path / "config.yaml").write_text("stt_model: null\nlanguage:\n", encoding="utf-8")
     cfg = load_config(tmp_path)

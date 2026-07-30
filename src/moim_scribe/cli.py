@@ -32,8 +32,16 @@ language: {language}
 
 # STT backend: "mlx" (Apple Silicon, install moim-scribe[mlx])
 #              "faster" (Windows / Linux / Intel Mac, install moim-scribe[cross])
+#              "soniox" (cloud) — UPLOADS THE AUDIO to Soniox, which returns it
+#                 already split by speaker. Needs no Hugging Face token and no
+#                 local model. Fast and accurate when people take turns; in
+#                 testing on a noisy conversation where several people talked
+#                 over each other it merged speakers together. It accepts no
+#                 speaker count, so a count in the filename is ignored.
+#                 Requires an API key — see docs/setup-soniox.md.
 stt_backend: {stt_backend}
 # stt_model: null            # override the backend's default whisper model
+# soniox_region: us          # us | eu | jp (eu and jp need activation by Soniox)
 
 # Summarizer backend: claude_cli | anthropic_api | ollama | none
 #   claude_cli    your existing Claude Code login — sends the transcript to Anthropic
@@ -102,19 +110,36 @@ def cmd_init(args) -> int:
 
     # A workspace-local safety net in case the user ever runs `git init` here.
     gi = ws / ".gitignore"
+    secret_names = (".hf_token", ".soniox_key")
     if not gi.exists():
         gi.write_text(
             "# moim-scribe workspace: private by default\n"
             "speakers/\n*.npy\ninbox/\nresults/\nmodels/\n"
             "*.wav\n*.m4a\n*.mp3\n*.flac\n*.ogg\n*.aac\n*.opus\n"
-            ".hf_token\n_history/\n",
+            + "".join(f"{n}\n" for n in secret_names)
+            + "_history/\n",
             encoding="utf-8",
         )
+    else:
+        # `init --force` on an existing workspace, and workspaces created before
+        # a secret file existed, both land here. Writing nothing would leave the
+        # new key unignored in exactly the workspaces that predate it — so
+        # append what is missing rather than skipping, and leave the rest of the
+        # user's file alone.
+        existing = gi.read_text(encoding="utf-8")
+        lines = {ln.strip() for ln in existing.splitlines()}
+        missing = [n for n in secret_names if n not in lines]
+        if missing:
+            sep = "" if existing.endswith("\n") else "\n"
+            gi.write_text(existing + sep + "".join(f"{n}\n" for n in missing), encoding="utf-8")
+            print(f"  added to .gitignore: {', '.join(missing)}")
 
     print(f"workspace ready: {ws}")
     print("next steps:")
     print("  1. get a Hugging Face token + accept the pyannote model terms")
     print(f"     (docs/setup-pyannote.md) and save it to {ws}/.hf_token")
+    print("     — or set stt_backend: soniox in config.yaml to transcribe in the")
+    print("       cloud instead, which needs no token but uploads the audio")
     print("  2. drop a recording into inbox/meeting/ (or gathering/, transcript/)")
     print(f"  3. run: moim-scribe watch {ws}")
     return 0
@@ -223,7 +248,22 @@ def cmd_doctor(args) -> int:
     check("ffmpeg on PATH", shutil.which("ffmpeg") is not None, "install ffmpeg (brew/winget/apt)")
     check("ffprobe on PATH", shutil.which("ffprobe") is not None, "comes with ffmpeg")
 
-    if cfg.stt_backend == "mlx":
+    import os
+
+    cloud = cfg.stt_backend == "soniox"
+    if cloud:
+        print("[i  ] stt=soniox — the recording is uploaded for transcription")
+        check(
+            "Soniox API key (SONIOX_API_KEY or <workspace>/.soniox_key)",
+            bool(os.environ.get("SONIOX_API_KEY")) or cfg.soniox_key_path.exists(),
+            "see docs/setup-soniox.md",
+        )
+        check(
+            f"soniox_region is one of us/eu/jp (got {cfg.soniox_region!r})",
+            cfg.soniox_region in ("us", "eu", "jp"),
+            "eu and jp also need activation by Soniox before they answer",
+        )
+    elif cfg.stt_backend == "mlx":
         try:
             import mlx_whisper  # noqa: F401
             check("stt backend mlx-whisper importable", True)
@@ -236,24 +276,29 @@ def cmd_doctor(args) -> int:
         except ImportError:
             check("stt backend faster-whisper importable", False, 'pip install "moim-scribe[cross]"')
 
-    try:
-        import pyannote.audio  # noqa: F401
-        check("pyannote.audio importable", True)
-    except ImportError:
-        check("pyannote.audio importable", False, "pip install moim-scribe")
+    # 🔴 pyannote and the HF token are only needed to split speakers locally,
+    # which Soniox does server-side. speechbrain is checked either way: the
+    # fingerprint matching that turns SPEAKER_00 into a name runs locally on
+    # both paths, so skipping it here would hide a real breakage.
+    if not cloud:
+        try:
+            import pyannote.audio  # noqa: F401
+            check("pyannote.audio importable", True)
+        except ImportError:
+            check("pyannote.audio importable", False, "pip install moim-scribe")
     try:
         import speechbrain  # noqa: F401
         check("speechbrain importable", True)
     except ImportError:
         check("speechbrain importable", False, "pip install moim-scribe")
 
-    import os
-    token_present = bool(os.environ.get("HF_TOKEN")) or (cfg.workspace / ".hf_token").exists()
-    check(
-        "Hugging Face token (HF_TOKEN or <workspace>/.hf_token)",
-        token_present,
-        "see docs/setup-pyannote.md — token + model terms acceptance are required once",
-    )
+    if not cloud:
+        token_present = bool(os.environ.get("HF_TOKEN")) or (cfg.workspace / ".hf_token").exists()
+        check(
+            "Hugging Face token (HF_TOKEN or <workspace>/.hf_token)",
+            token_present,
+            "see docs/setup-pyannote.md — token + model terms acceptance are required once",
+        )
 
     if cfg.summarizer == "claude_cli":
         check("claude CLI on PATH", shutil.which("claude") is not None,

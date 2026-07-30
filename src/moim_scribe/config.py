@@ -36,8 +36,15 @@ AUDIO_EXTS = (".m4a", ".mp3", ".wav", ".flac", ".ogg", ".aac", ".opus")
 class Config:
     workspace: Path
     language: str = "ko"
+    # "mlx" / "faster" transcribe locally. "soniox" uploads the audio to
+    # Soniox, which returns it already diarized — a different pipeline, not
+    # just a different transcriber, and the only option that sends audio off
+    # the machine. See docs/setup-soniox.md.
     stt_backend: str = "mlx"
     stt_model: str | None = None
+    # Soniox region: us, eu or jp. eu and jp need activation by Soniox before
+    # they will answer, so the default stays us.
+    soniox_region: str = "us"
     summarizer: str = "claude_cli"
     summarizer_model: str | None = None
     summarizer_timeout_sec: int = 900
@@ -78,6 +85,10 @@ class Config:
         return self.workspace / "glossary.txt"
 
     @property
+    def soniox_key_path(self) -> Path:
+        return self.workspace / ".soniox_key"
+
+    @property
     def processing_dir(self) -> Path:
         return self.inbox_dir / "_processing"
 
@@ -105,6 +116,7 @@ def load_config(workspace: str | Path) -> Config:
         "language",
         "stt_backend",
         "stt_model",
+        "soniox_region",
         "summarizer",
         "summarizer_model",
         "summarizer_timeout_sec",
