@@ -32,5 +32,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install ruff
+      # Pinned on purpose. Unpinned, this step installs whatever ruff released
+      # most recently, so a push that changes nothing relevant turns the branch
+      # red the day a new rule ships — which is what happened on 0.16.0, where
+      # thirteen findings landed in code no commit had touched. Moving the pin
+      # is then a deliberate change with those findings as its work item.
+      - run: pip install ruff==0.15.22
       - run: ruff check src tests

@@ -24,11 +24,28 @@ def test_prefetch_survives_an_unreadable_path(tmp_path, caplog):
     assert "prefetch skipped" in caplog.text
 
 
+def _clock(*ticks):
+    """A stand-in for time.time that yields the given values, then holds the last.
+
+    Patching pipeline.time.time replaces the attribute on the shared `time`
+    module, so logging draws its LogRecord timestamp from the same stand-in —
+    and how many times it does so is a CPython implementation detail that
+    varies by version. An iterator of exactly two values passed on macOS and
+    raised StopIteration on Linux CI. Repeating the final value keeps the
+    elapsed-time assertion while depending on nobody else's call count.
+    """
+    seq = list(ticks)
+
+    def clock():
+        return seq.pop(0) if len(seq) > 1 else seq[0]
+
+    return clock
+
+
 def test_prefetch_logs_when_it_held_the_pipeline(tmp_path, monkeypatch, caplog):
     f = tmp_path / "rec.m4a"
     f.write_bytes(b"x" * 128)
-    ticks = iter([0.0, 99.0])
-    monkeypatch.setattr("moim_scribe.pipeline.time.time", lambda: next(ticks))
+    monkeypatch.setattr("moim_scribe.pipeline.time.time", _clock(0.0, 99.0))
     with caplog.at_level("INFO"):
         _prefetch(f)
     assert "the pipeline was held" in caplog.text
@@ -37,8 +54,7 @@ def test_prefetch_logs_when_it_held_the_pipeline(tmp_path, monkeypatch, caplog):
 def test_prefetch_is_quiet_when_fast(tmp_path, monkeypatch, caplog):
     f = tmp_path / "rec.m4a"
     f.write_bytes(b"x" * 128)
-    ticks = iter([0.0, 0.2])
-    monkeypatch.setattr("moim_scribe.pipeline.time.time", lambda: next(ticks))
+    monkeypatch.setattr("moim_scribe.pipeline.time.time", _clock(0.0, 0.2))
     with caplog.at_level("INFO"):
         _prefetch(f)
     assert caplog.text == ""

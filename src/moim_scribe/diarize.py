@@ -234,7 +234,12 @@ def dedupe_repeated_segments(
     return out, n_removed
 
 
-INTRA_REPEAT_RE = re.compile(r"(.{1,%d}?)\1{%d,}" % (INTRA_REPEAT_UNIT_MAX, INTRA_REPEAT_MIN - 1))
+INTRA_REPEAT_RE = re.compile(
+    # Reads as: (.{1,20}?)\1{7,} — a shortest-possible unit of up to
+    # INTRA_REPEAT_UNIT_MAX chars, then that same unit INTRA_REPEAT_MIN-1 more
+    # times. Doubled braces are f-string escapes, not part of the pattern.
+    rf"(.{{1,{INTRA_REPEAT_UNIT_MAX}}}?)\1{{{INTRA_REPEAT_MIN - 1},}}"
+)
 
 
 def strip_intra_repeat(text: str, drop_len: int = INTRA_REPEAT_DROP_LEN) -> str:

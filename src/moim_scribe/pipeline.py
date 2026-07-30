@@ -187,7 +187,7 @@ def classify_audio(path: Path) -> bool:
         probe = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "a:0",
              "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(path)],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=60, check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return False
