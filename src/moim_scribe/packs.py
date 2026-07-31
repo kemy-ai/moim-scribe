@@ -19,10 +19,16 @@ import json
 import logging
 import re
 import unicodedata
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 logger = logging.getLogger("moim_scribe.packs")
+
+
+def _today_local() -> date:
+    """The user's local calendar date, timezone-explicit. A card saved at 1am
+    KST must carry that local date, not the previous day's UTC date."""
+    return datetime.now(UTC).astimezone().date()
 
 MAX_BLOCK_CHARS = 8000
 TRUNCATE_TAIL = {"ko": "\n…(배경 일부 생략)", "en": "\n…(background truncated)"}
@@ -222,7 +228,7 @@ def build_card(type_: str, title: str, out_md_path: str | Path) -> str:
     """Round-card body: header (date, title, type, result path) + harvested sections."""
     abs_path = str(Path(out_md_path).resolve())
     header = (
-        f"# Round card — {title} ({date.today().isoformat()})\n\n"
+        f"# Round card — {title} ({_today_local().isoformat()})\n\n"
         f"- type: {type_}\n"
         f"- result: {abs_path}"
     )
@@ -250,7 +256,7 @@ def save_card(packs_dir: Path, type_: str, title: str, out_md_path: str | Path) 
     try:
         history_dir = pack_dir / "_history"
         history_dir.mkdir(parents=True, exist_ok=True)
-        stem = f"{date.today().isoformat()}_{_safe_title(title)}"
+        stem = f"{_today_local().isoformat()}_{_safe_title(title)}"
         dest = _unique_history_path(history_dir, stem)
         dest.write_text(build_card(type_, title, out_md_path), encoding="utf-8")
         logger.info(f"round card saved: {dest}")

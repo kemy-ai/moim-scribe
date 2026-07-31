@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -95,7 +95,7 @@ class SpeakerDB:
         entry["sources"].append({"source": source, "sec": round(used_sec, 1)})
         entry["n_samples"] = entry.get("n_samples", 0) + 1
         entry["total_sec"] = round(total_sec, 1)
-        entry["updated"] = datetime.now(timezone.utc).isoformat()
+        entry["updated"] = datetime.now(UTC).isoformat()
 
         index[name] = entry
         self.save_index(index)

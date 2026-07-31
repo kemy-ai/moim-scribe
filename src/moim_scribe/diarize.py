@@ -25,7 +25,7 @@ from pathlib import Path
 
 from .lang import detect_num_speakers
 from .speakers.db import SpeakerDB
-from .stt import STTBackend, Segment
+from .stt import Segment, STTBackend
 
 logger = logging.getLogger("moim_scribe.diarize")
 

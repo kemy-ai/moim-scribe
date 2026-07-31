@@ -4,6 +4,7 @@ Requires the ANTHROPIC_API_KEY environment variable.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import time
@@ -60,10 +61,8 @@ class AnthropicApiSummarizer:
                 retryable = e.code == 429 or 500 <= e.code < 600
                 if not retryable or attempt >= MAX_RETRIES:
                     detail = ""
-                    try:
+                    with contextlib.suppress(Exception):
                         detail = e.read().decode("utf-8")[:300]
-                    except Exception:  # noqa: BLE001
-                        pass
                     raise RuntimeError(f"Anthropic API HTTP {e.code}: {detail}") from e
                 time.sleep(min(2**attempt * 2, 60))
                 last = e

@@ -50,7 +50,7 @@ def test_summarizer_factory_builds_cli():
 def test_claude_cli_missing_executable_message():
     s = ClaudeCliSummarizer("sonnet", executable=None)
     s.executable = "/nonexistent/claude-binary"
-    with pytest.raises(Exception):
+    with pytest.raises(FileNotFoundError):
         s.summarize("prompt")
 
 

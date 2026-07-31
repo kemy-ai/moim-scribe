@@ -29,6 +29,7 @@ class ClaudeCliSummarizer:
             capture_output=True,
             text=True,
             timeout=self.timeout_sec,
+            check=False,
         )
         if r.returncode != 0:
             raise RuntimeError(f"claude CLI exited {r.returncode}: {r.stderr.strip()[:500]}")

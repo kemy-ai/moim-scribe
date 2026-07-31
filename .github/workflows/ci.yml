@@ -37,5 +37,5 @@ jobs:
       # red the day a new rule ships — which is what happened on 0.16.0, where
       # thirteen findings landed in code no commit had touched. Moving the pin
       # is then a deliberate change with those findings as its work item.
-      - run: pip install ruff==0.15.22
+      - run: pip install ruff==0.16.1
       - run: ruff check src tests

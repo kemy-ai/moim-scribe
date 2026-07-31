@@ -20,7 +20,7 @@ import subprocess
 import sys
 import time
 import unicodedata
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .config import AUDIO_EXTS, Config
@@ -100,14 +100,14 @@ def _recording_time_block(audio_path: Path, language: str) -> str:
         r = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format_tags=creation_time",
              "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path)],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=60, check=False,
         )
         raw = r.stdout.strip().splitlines()[0].strip() if r.stdout.strip() else ""
         if not raw:
             return ""
-        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(raw)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         local = dt.astimezone()
         h = _headers(language)
         return f"{h['rec_info']}\n{h['rec_line'].format(dt=local.strftime('%Y-%m-%d (%a) %H:%M'))}\n"
@@ -255,7 +255,7 @@ def is_stable_audio(path: Path) -> bool:
         return False
     probe = subprocess.run(
         ["ffmpeg", "-v", "error", "-i", str(path), "-t", "0.1", "-f", "null", "-"],
-        capture_output=True, timeout=60,
+        capture_output=True, timeout=60, check=False,
     )
     if probe.returncode != 0:
         logger.info(f"SKIP not decodable yet (cloud download in progress?): {path.name}")
@@ -290,7 +290,9 @@ def process_recording(cfg: Config, claimed: Path, type_folder: str) -> Path:
     """
     lens_name = cfg.types.get(type_folder, None)
     hint, title = filename_speaker_hint(claimed.stem, cfg.language)
-    date_tag = datetime.now().strftime("%y%m%d")
+    # The user's local date, timezone-explicit — result filenames must match
+    # the day the user experienced, not the UTC day.
+    date_tag = datetime.now(UTC).astimezone().strftime("%y%m%d")
     logger.info(
         f"processing: {claimed.name} (type={type_folder}, title={title}"
         + (f", speakers={hint} from filename)" if hint else ")")
