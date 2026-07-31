@@ -148,9 +148,9 @@ MERGE_WINNER_MIN_AVG_SIM = 0.28  # a merge "winner" needs not just share but
 # 0.382-0.474 and spurious ones 0.383-0.428 — overlapping, so no threshold on
 # this axis tells them apart. Treat 0.28 as a share-filter companion that
 # removes obvious noise, not as a guard against a non-attendee becoming an
-# anchor. Upstream responded by suspending automatic reassignment when the
-# attendee list is unknown; this project has no attendee-list concept, so the
-# exposure remains and is documented rather than claimed to be solved.
+# anchor. That guard is now the presence gate (ANCHOR_PRESENCE_* above): a
+# nominated anchor without segment-level evidence of being in the recording
+# withholds the whole repair before any label is applied.
 
 
 def get_hf_token(data_dir: Path, arg_token: str | None = None) -> str:
