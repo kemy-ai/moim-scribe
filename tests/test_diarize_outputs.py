@@ -17,7 +17,11 @@ from moim_scribe.diarize import write_outputs
 # needs a deliberate call on whether it may reach a summarizer prompt.
 KNOWN_TOP_KEYS = {"n_speakers", "speakers", "merge_reassign"}
 KNOWN_ENTRY_KEYS = {"label", "talk_sec", "share", "identified", "raw_speaker", "match_score"}
-KNOWN_MERGE_REASSIGN_KEYS = {"triggered", "method", "anchors", "suspects", "stats"}
+# presence_unconfirmed: the presence gate's withhold reason (anchor names on
+# purpose — post-hoc diagnosis; speaker_stats drops it before any prompt).
+KNOWN_MERGE_REASSIGN_KEYS = {
+    "triggered", "method", "anchors", "suspects", "stats", "presence_unconfirmed",
+}
 
 CLEAN_MERGE_INFO = {"triggered": False, "suspects": {}, "anchors": [], "stats": {}}
 TRIGGERED_MERGE_INFO = {
@@ -131,6 +135,22 @@ def test_merge_reassign_present_only_when_triggered(tmp_path):
     *_, fired = _write(tmp_path, merge_info=TRIGGERED_MERGE_INFO)
     assert fired["merge_reassign"]["anchors"] == ["Ada", "Bo"]
     assert "margin>=" in fired["merge_reassign"]["method"]
+
+
+def test_merge_reassign_written_when_presence_gate_withheld(tmp_path):
+    """A withheld pass must leave its reason on disk. triggered stays False,
+    but the block exists and names the unconfirmed anchors — otherwise
+    "why did nobody get renamed?" has no answer after the fact."""
+    withheld = {
+        "triggered": False,
+        "suspects": {"SPEAKER_00": {"talk": {"Ada": 9.0}, "winners": ["Ada"], "avg_sim": {"Ada": 0.4}}},
+        "anchors": ["Ada", "Bo"],
+        "stats": {"n_total": 3, "anchor_presence": {"Ada": 3, "Bo": 0}},
+        "presence_unconfirmed": ["Bo"],
+    }
+    *_, data = _write(tmp_path, merge_info=withheld)
+    assert data["merge_reassign"]["triggered"] is False
+    assert data["merge_reassign"]["presence_unconfirmed"] == ["Bo"]
 
 
 def test_top_level_keys_within_allow_list(tmp_path):

@@ -108,8 +108,32 @@ REASSIGN_MARGIN_MIN = 0.05  # if best-vs-second similarity margin is smaller,
 # handed to that absent person's name wholesale — and the "at least 2 anchors"
 # gate below does not catch it, because two anchors is precisely that case.
 # Measurement has twice shown there is no fix on the score axis (see
-# MERGE_WINNER_MIN_AVG_SIM). The remaining axis is knowing who attended.
+# MERGE_WINNER_MIN_AVG_SIM). The remaining axis is knowing who attended —
+# which is what the presence gate below (ANCHOR_PRESENCE_*) now checks.
 REASSIGN_SMOOTH_MAX_SEC = 3.0  # absorb isolated one-offs (A B A -> A A A) under this length
+
+# ── Anchor presence gate ─────────────────────────────────────────────────────
+# Before reassignment labels are applied, every anchor must show segment-level
+# evidence of actually being in this recording; if any anchor lacks it, the
+# whole reassignment is withheld (existing labels kept). Rationale: the anchor
+# set can contain people who were never in the room (see the log-line comment
+# in detect_and_fix_merged_speakers), and the relative pass above then hands
+# them someone else's speech. Dropping only the unverified anchor is NOT safer:
+# if that anchor really was present, their speech gets absorbed by the
+# remaining anchors — a new misattribution. Withholding fails closed either
+# way: worst case is "no name attached", never "the wrong name attached".
+ANCHOR_PRESENCE_MIN_SIM = 0.60  # a segment counts as presence evidence at this similarity
+ANCHOR_PRESENCE_MIN_SEGS = 2  # fewer evidence segments than this = presence unconfirmed
+# Upstream measurement (16 recordings x 26 enrolled, same computation and the
+# same 1-15s segment population as this pass): a max-similarity threshold fails
+# for the third time — lowest genuine attendee 0.498 (barely spoke) / 0.545
+# (phone audio) sits BELOW the highest absentee 0.634. But the *count* axis
+# separates cleanly: absentees peaked at 0-1 segments >= 0.60 (a lone chance
+# hit is the ceiling; it never happened twice), while 36 of 39 attendee pairs
+# had 2+. Cost measured on that corpus: 3 of 16 recordings flip to withheld
+# (a barely-speaking or phone-audio attendee loses auto-naming). The line is
+# an observation at 26 enrolled voices — re-measure as the enrolment DB grows,
+# because an absentee's chance hits approach 2 as near-pairs accumulate.
 
 MERGE_WINNER_MIN_AVG_SIM = 0.28  # a merge "winner" needs not just share but
 # a minimum average similarity over its matched segments. Share alone can be
@@ -386,30 +410,47 @@ def identify_speakers(
     return merged, mapping, sims_log
 
 
+def _segment_sims(
+    wav, sr: int, start: float, end: float, anchors: dict, model_dir: Path,
+) -> dict | None:
+    """Embed a single range and return its similarity to every anchor.
+
+    The computation half of _segment_identify, split out because the presence
+    gate needs the full similarity dict, not just the winner. Called thousands
+    of times per recording, so it does zero disk I/O: anchors are passed in,
+    audio is already in memory. Returns None when embedding fails.
+    """
+    from .speakers.embed import cosine_similarity, extract_embedding_from_segments
+
+    emb, _used = extract_embedding_from_segments(wav, sr, [(start, end)], model_dir)
+    if emb is None:
+        return None
+    return {name: cosine_similarity(emb, e) for name, e in anchors.items()}
+
+
+def _pick_best(sims_d: dict, unknown_threshold: float) -> tuple[str | None, float, float]:
+    """(best name or None below threshold, best score, margin best-vs-second)."""
+    sims = sorted(sims_d.items(), key=lambda kv: -kv[1])
+    best_name, best_score = sims[0]
+    margin = best_score - (sims[1][1] if len(sims) > 1 else -1.0)
+    if best_score < unknown_threshold:
+        return None, best_score, margin
+    return best_name, best_score, margin
+
+
 def _segment_identify(
     wav, sr: int, start: float, end: float, anchors: dict, unknown_threshold: float,
     model_dir: Path,
 ) -> tuple[str | None, float, float]:
     """Embed a single range and argmax against pre-loaded anchor embeddings.
 
-    Called thousands of times per recording, so it does zero disk I/O:
-    anchors are passed in, audio is already in memory.
-    Returns (best name or None, best score, margin best-vs-second).
+    _segment_sims + _pick_best, same signature and behavior as before the
+    split (detect_cluster_merges still calls this form).
     """
-    from .speakers.embed import cosine_similarity, extract_embedding_from_segments
-
-    emb, _used = extract_embedding_from_segments(wav, sr, [(start, end)], model_dir)
-    if emb is None:
+    sims_d = _segment_sims(wav, sr, start, end, anchors, model_dir)
+    if sims_d is None:
         return None, 0.0, 0.0
-    sims = sorted(
-        ((name, cosine_similarity(emb, e)) for name, e in anchors.items()),
-        key=lambda kv: -kv[1],
-    )
-    best_name, best_score = sims[0]
-    margin = best_score - (sims[1][1] if len(sims) > 1 else -1.0)
-    if best_score < unknown_threshold:
-        return None, best_score, margin
-    return best_name, best_score, margin
+    return _pick_best(sims_d, unknown_threshold)
 
 
 def detect_cluster_merges(
@@ -487,6 +528,11 @@ def reassign_with_anchors(
     assigned: list[str | None] = [None] * n
     keep = [False] * n  # True = protected: unenrolled or too-long, label untouched
     n_conf = n_keep_unregistered = n_keep_toolong = 0
+    # Presence evidence per anchor: segments at >= ANCHOR_PRESENCE_MIN_SIM,
+    # counted regardless of rank. Two similar attendees can leave one of them
+    # permanently in second place; dropping runner-up evidence would make this
+    # a different statistic from the one the separation line was measured on.
+    presence: Counter = Counter()
 
     for i, s in enumerate(merged):
         dur = s["end"] - s["start"]
@@ -496,9 +542,14 @@ def reassign_with_anchors(
             keep[i] = True
             n_keep_toolong += 1
             continue
-        name, _score, margin = _segment_identify(
-            wav, sr, s["start"], s["end"], anchors, unknown_threshold, model_dir
-        )
+        sims_d = _segment_sims(wav, sr, s["start"], s["end"], anchors, model_dir)
+        if sims_d is None:
+            name, margin = None, 0.0
+        else:
+            for n2, v in sims_d.items():
+                if v >= ANCHOR_PRESENCE_MIN_SIM:
+                    presence[n2] += 1
+            name, _score, margin = _pick_best(sims_d, unknown_threshold)
         if name is None:
             keep[i] = True
             n_keep_unregistered += 1
@@ -551,6 +602,10 @@ def reassign_with_anchors(
         "n_keep_unregistered": n_keep_unregistered,
         "n_keep_toolong": n_keep_toolong,
         "n_smooth": n_smooth,
+        # Per-anchor presence-evidence counts — the caller's withhold decision
+        # and the post-hoc diagnosis record. Anchors with zero evidence are
+        # listed as 0 explicitly (absence must not be silent).
+        "anchor_presence": {name: int(presence.get(name, 0)) for name in anchors},
     }
     return new_labels, stats
 
@@ -566,7 +621,9 @@ def detect_and_fix_merged_speakers(
     partial failure leaves the original labels intact (the caller also
     wraps this in try/except — the pipeline must always finish).
 
-    Returns (merged, info) with info = {triggered, suspects, anchors, stats}.
+    Returns (merged, info) with info = {triggered, suspects, anchors, stats}
+    plus presence_unconfirmed (anchor names) when the presence gate withheld
+    the reassignment — triggered stays False and labels are untouched then.
     """
     info: dict = {"triggered": False, "suspects": {}, "anchors": [], "stats": {}}
 
@@ -619,6 +676,26 @@ def detect_and_fix_merged_speakers(
 
     new_labels, stats = reassign_with_anchors(wav, sr, merged, anchors, model_dir)
     info["stats"] = stats
+
+    # Presence gate: check BEFORE the labels are applied. If any anchor lacks
+    # segment-level evidence of being in this recording, withhold the whole
+    # reassignment (see the ANCHOR_PRESENCE_* comment for why withholding, not
+    # dropping the anchor). Unconfirmed does not mean absent — a barely-speaking
+    # or phone-audio attendee looks the same; they just keep their raw label.
+    presence = stats.get("anchor_presence", {})
+    unconfirmed = sorted(
+        n for n in anchor_names if presence.get(n, 0) < ANCHOR_PRESENCE_MIN_SEGS
+    )
+    if unconfirmed:
+        info["presence_unconfirmed"] = unconfirmed
+        logger.info(
+            # Count, not names, for the same reason as the trigger line above.
+            f"presence unconfirmed for {len(unconfirmed)}/{len(anchor_names)} anchors "
+            f"(fewer than {ANCHOR_PRESENCE_MIN_SEGS} segments at >= "
+            f"{ANCHOR_PRESENCE_MIN_SIM} similarity) — reassignment withheld, labels kept"
+        )
+        return merged, info
+
     info["triggered"] = True
     for m, new in zip(merged, new_labels):
         m["speaker"] = new
@@ -702,7 +779,7 @@ def write_outputs(
         "n_speakers": len(speakers_data),
         "speakers": speakers_data,
     }
-    if merge_info.get("triggered"):
+    if merge_info.get("triggered") or merge_info.get("presence_unconfirmed"):
         # An allow-list, not a passthrough: putting a field on merge_info does
         # NOT surface it here. Adding one means editing this dict too, and then
         # deciding whether it belongs in a prompt — "anchors" and "suspects" are
@@ -710,15 +787,22 @@ def write_outputs(
         # people who were not in the room. tests/test_diarize_outputs.py pins
         # the key set at all three levels (top, speakers[], merge_reassign) so
         # neither an omission nor an unreviewed addition can be silent.
+        # The block is also written when the presence gate withheld the pass
+        # (triggered stays False) — that is the record of WHY nothing was
+        # renamed, which would otherwise vanish.
         speakers_json["merge_reassign"] = {
             # Stated rather than implied by the block's presence: this is the one
             # field here a summarizer prompt may see (speaker_stats keeps it and
             # drops the rest), and audit tooling filters on it.
-            "triggered": True,
+            "triggered": bool(merge_info.get("triggered")),
             "method": f"enrollment_reassign(ECAPA argmax, margin>={REASSIGN_MARGIN_MIN})",
             "anchors": merge_info["anchors"],
             "suspects": merge_info["suspects"],
             "stats": merge_info["stats"],
+            # Withhold reason — names on purpose: this is the post-hoc diagnosis
+            # record ("why did nobody get named?"), and speaker_stats drops
+            # everything in this block except "triggered" before any prompt.
+            "presence_unconfirmed": merge_info.get("presence_unconfirmed", []),
         }
     out_speakers = os.path.join(session, prefix + "speakers.json")
     with open(out_speakers, "w", encoding="utf-8") as f:

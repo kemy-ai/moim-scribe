@@ -51,6 +51,20 @@ def test_merge_reassign_keeps_only_the_boolean():
     assert out["merge_reassign"] == {"triggered": True}
 
 
+def test_presence_unconfirmed_never_reaches_a_prompt():
+    """The withhold reason names anchors compared against the whole DB — people
+    possibly not in the room. The allow-list drops it structurally; this pins
+    that the new field stays dropped if the list is ever widened."""
+    withheld = {
+        "triggered": False,
+        "anchors": ["Ada", "Bo"],
+        "presence_unconfirmed": ["Bo"],
+        "stats": {"anchor_presence": {"Ada": 3, "Bo": 0}},
+    }
+    out = strip_diagnostic_keys({"n_speakers": 1, "speakers": [], "merge_reassign": withheld})
+    assert out["merge_reassign"] == {"triggered": False}
+
+
 def test_merge_reassign_survives_as_a_signal_not_as_a_deletion():
     """A lens needs to know a reassignment happened — that is why it is not dropped whole."""
     assert "triggered" in MERGE_REASSIGN_PROMPT_KEYS
