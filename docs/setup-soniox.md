@@ -24,13 +24,14 @@ that is already split by speaker.
   is a separate thing to agree to from "the transcript is sent to an AI".
 - **Speakers can be merged on noisy recordings.** In testing, a conversation
   where several people talked over each other came back with distinct speakers
-  fused into one. Where turn-taking is clean it did well. If a recording
-  matters and it is the crowded kind, the local path with an explicit speaker
-  count is the safer one.
-- **You cannot tell it how many speakers there are.** Diarization is a single
-  on/off switch and it detects up to 15 speakers by itself. A count in the
-  filename — which the local backends use — is ignored here; the log says so
-  each time it drops one.
+  fused into one. Where turn-taking is clean it did well. If you have a Hugging
+  Face token, the hybrid step below fixes exactly this and is on by default;
+  without one, the local path with an explicit speaker count is the safer
+  choice for a crowded recording that matters.
+- **Soniox itself cannot be told how many speakers there are.** Diarization is
+  a single on/off switch and it detects up to 15 speakers by itself. A count in
+  the filename reaches pyannote when the hybrid step runs, and is dropped
+  otherwise — the log says which happened.
 - It costs money and has quotas you have to keep an eye on (below).
 
 ## Get a key
@@ -63,9 +64,45 @@ Then check the setup:
 moim-scribe doctor ~/MyMeetings
 ```
 
-With `soniox` selected, `doctor` stops asking for pyannote and the Hugging Face
-token — neither is used — but still checks `speechbrain`, because matching
-voices to names runs locally on both paths.
+With `soniox` selected, `doctor` stops requiring pyannote and the Hugging Face
+token, but still checks `speechbrain`, because matching voices to names runs
+locally on both paths.
+
+## Better speaker separation, if you already have pyannote
+
+Soniox transcribes well and separates speakers poorly. On one 5-person meeting
+it produced 56k characters with proper nouns intact, and collapsed those five
+people into two or three blocks; pyannote on the same file separated all five
+and lost the names. A second recording reproduced it. The two engines fail in
+opposite directions, so moim-scribe runs both and keeps the better half of
+each — **Soniox's text with pyannote's speaker boundaries**.
+
+This is on by default and costs nothing to leave on:
+
+```yaml
+hybrid_diarization: true    # default
+```
+
+- **No Hugging Face token → the step skips itself**, silently, and you get
+  Soniox's own labels exactly as before. Nothing to configure, nothing to turn
+  off. `doctor` says which of the two is happening.
+- **With a token**, pyannote runs locally on your machine after the transcript
+  comes back. The audio has already been uploaded at that point, so this adds
+  no new privacy question — but it does add local processing time, roughly what
+  a local diarization run would cost, and the first run downloads the pyannote
+  models if you have never used the local path. `moim-scribe doctor` fails on a
+  missing `pyannote.audio` when a token is present, so you find that out before
+  a recording does.
+- A speaker count in the filename (`team meeting 5p.m4a`) reaches pyannote here.
+  It is the only way that hint does anything on this path; Soniox takes no
+  count of its own.
+
+Set it to `false` to keep Soniox's labels even when pyannote is available.
+
+🔴 Every failure of this step is absorbed — no token, no model, no GPU, an
+unreadable file — and the run finishes with Soniox's labels. The transcription
+has already been paid for by then and cannot be repeated, so an improvement is
+never allowed to cost it.
 
 ## Limits worth knowing before you rely on it
 

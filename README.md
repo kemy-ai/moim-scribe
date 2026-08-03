@@ -13,7 +13,7 @@
 ```mermaid
 flowchart TD
     subgraph machine["on your machine"]
-        A["inbox/<br>recording lands"] --> B["transcribe + diarize<br>whisper (mlx / faster) + pyannote"]
+        A["inbox/<br>recording lands"] --> B["transcribe + diarize<br>whisper (mlx / faster) + pyannote<br>(soniox: its text + pyannote boundaries)"]
         FP[("speaker fingerprints<br>grow every session")] <--> B
         B --> C["summarize with your group's<br>lens · style · pack"]
         C --> D["results/<br>notes md + diarized transcript"]
@@ -51,9 +51,9 @@ pyannote and speechbrain are PyTorch and run everywhere (CUDA, MPS, CPU). The wa
 |---|---|---|---|
 | `mlx` (default on Apple Silicon) | your machine | pyannote, locally | takes a speaker count from the filename or a spoken cue |
 | `faster` (default elsewhere) | your machine | pyannote, locally | same |
-| `soniox` | Soniox's servers — **the audio is uploaded** | done by Soniox | no pyannote, no Hugging Face token, no model download. Needs an API key and is billed per hour of audio |
+| `soniox` | Soniox's servers — **the audio is uploaded** | Soniox, or pyannote locally if you have a token | no model download required. Needs an API key and is billed per hour of audio |
 
-`soniox` is worth knowing two things about before choosing it. It is fast and accurate **when people take turns speaking**; on a noisy recording where several people talked over each other, testing found it fusing distinct speakers into one. And it accepts **no speaker count** — diarization is a single on/off switch that detects up to 15 speakers by itself, so a count in the filename is ignored on this path (the log says so when it drops one). A single file is capped at 300 minutes.
+`soniox` is fast and accurate **when people take turns speaking**; on a noisy recording where several people talked over each other, testing found it fusing distinct speakers into one. If a Hugging Face token is present, moim-scribe fixes that by keeping Soniox's text and re-deriving the speaker boundaries with pyannote locally — on by default, skipped silently without a token, and the only way a speaker count in the filename does anything on this path. Soniox alone accepts no count: diarization is a single on/off switch that detects up to 15 speakers by itself. A single file is capped at 300 minutes.
 
 Setup and the quota you have to manage: [docs/setup-soniox.md](docs/setup-soniox.md).
 

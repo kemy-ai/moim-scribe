@@ -306,6 +306,11 @@ def process_recording(cfg: Config, claimed: Path, type_folder: str) -> Path:
         # past the `except Exception` in scan_inbox — called unconditionally, a
         # Soniox user with no Hugging Face token would not get one failed
         # recording but a dead watch loop.
+        #
+        # The hybrid step needs that same token, and this is why it is handed a
+        # workspace to look in rather than a token: the lookup happens inside
+        # find_hf_token, which returns None instead of exiting. A missing token
+        # can then mean "skip the improvement" instead of "kill the loop".
         from .diarize_cloud import run_cloud_diarization
         from .stt.soniox_client import get_api_key
 
@@ -318,6 +323,8 @@ def process_recording(cfg: Config, claimed: Path, type_folder: str) -> Path:
             glossary_path=cfg.glossary_path,
             language_hints=[cfg.language],
             num_speakers=hint,
+            workspace=cfg.workspace,
+            hybrid=cfg.hybrid_diarization,
         )
     else:
         stt = get_backend(cfg.stt_backend, cfg.stt_model)

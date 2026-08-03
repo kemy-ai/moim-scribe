@@ -45,6 +45,13 @@ class Config:
     # Soniox region: us, eu or jp. eu and jp need activation by Soniox before
     # they will answer, so the default stays us.
     soniox_region: str = "us"
+    # On the Soniox path, re-run pyannote locally and take its speaker
+    # boundaries while keeping Soniox's text (see diarize.relabel_by_turns).
+    # Default on, but it costs nothing to leave on: without a Hugging Face
+    # token the step skips itself, so a Soniox-only setup is unaffected, and
+    # having a token means pyannote is already installed and set up. Set false
+    # to keep Soniox's own labels even when pyannote is available.
+    hybrid_diarization: bool = True
     summarizer: str = "claude_cli"
     summarizer_model: str | None = None
     summarizer_timeout_sec: int = 900
@@ -117,6 +124,7 @@ def load_config(workspace: str | Path) -> Config:
         "stt_backend",
         "stt_model",
         "soniox_region",
+        "hybrid_diarization",
         "summarizer",
         "summarizer_model",
         "summarizer_timeout_sec",

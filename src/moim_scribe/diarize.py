@@ -153,18 +153,37 @@ MERGE_WINNER_MIN_AVG_SIM = 0.28  # a merge "winner" needs not just share but
 # withholds the whole repair before any label is applied.
 
 
-def get_hf_token(data_dir: Path, arg_token: str | None = None) -> str:
-    """Resolve the Hugging Face token: argument > HF_TOKEN env > <data_dir>/.hf_token."""
+def find_hf_token(data_dir: Path, arg_token: str | None = None) -> str | None:
+    """The token, or None — for callers to whom a missing token is not fatal.
+
+    Priority: argument > HF_TOKEN env > <data_dir>/.hf_token.
+
+    get_hf_token below turns None into SystemExit, which is right for the local
+    path (pyannote is not optional there). The hybrid step on the Soniox path
+    needs the opposite: no token simply means no pyannote, and the transcript
+    still ships. Splitting the lookup from the refusal is what makes that
+    possible *structurally* — a caller that uses this function cannot raise
+    SystemExit by accident, and SystemExit is the one exception class that slips
+    past scan_inbox's `except Exception` and takes the whole watch loop with it.
+    """
     if arg_token:
         return arg_token
     if os.environ.get("HF_TOKEN"):
         return os.environ["HF_TOKEN"]
     p = data_dir / ".hf_token"
     if p.exists():
-        return p.read_text().strip()
+        return p.read_text().strip() or None
+    return None
+
+
+def get_hf_token(data_dir: Path, arg_token: str | None = None) -> str:
+    """Resolve the Hugging Face token, or refuse to continue without one."""
+    token = find_hf_token(data_dir, arg_token)
+    if token:
+        return token
     raise SystemExit(
         "No Hugging Face token found. Set HF_TOKEN, create "
-        f"{p}, or pass --token. See docs/setup-pyannote.md"
+        f"{data_dir / '.hf_token'}, or pass --token. See docs/setup-pyannote.md"
     )
 
 
@@ -347,6 +366,67 @@ def speaker_at(turns: list[tuple[float, float, str]], t: float) -> str:
         if d < bestd:
             best, bestd = spk, d
     return best
+
+
+def relabel_by_turns(
+    merged: list[dict], turns: list[tuple[float, float, str]]
+) -> tuple[list[dict], dict]:
+    """Replace segment speaker labels with the boundaries from a diarizer.
+
+    This is the hybrid path: **text from one engine, speaker boundaries from
+    another**. It exists because the two engines fail in opposite directions,
+    which one recording made unambiguous — the same 5-speaker meeting, run both
+    ways:
+
+        cloud STT : 56k characters, proper nouns intact / 5 speakers collapsed
+                    into 2-3 blocks
+        pyannote  : all 5 speakers separated correctly  / proper nouns lost
+
+    A second recording reproduced it. Using either engine alone gives up one of
+    those columns every time; running both and taking the better half of each
+    gives up neither.
+
+    Mapping is by **maximum overlap**, not by looking up the speaker at each
+    segment's start time. A segment is an interval, and its edges never line up
+    with turn edges, so a start-time lookup hands every boundary-straddling
+    segment to whoever was speaking just before it. Segments that overlap no
+    turn at all (they fall in a gap between turns) keep the label they arrived
+    with — inventing one would be worse than leaving it unclassified.
+
+    Returns (new list, stats). The input is not mutated.
+    """
+    if not turns:
+        return merged, {"n_relabeled": 0, "n_kept": len(merged), "n_turn_speakers": 0}
+    # Sort here rather than documenting an assumption. The `break` below is only
+    # correct on time-ordered turns, and that ordering is an implementation
+    # detail of pyannote's itertracks. Out of order, the loop would quietly map
+    # some segments and skip others, and the symptom — "speakers are sometimes
+    # wrong" — points nowhere near this line. One sort of a few thousand turns
+    # costs nothing.
+    turns = sorted(turns, key=lambda x: (x[0], x[1]))
+    out, n_relabeled, n_kept = [], 0, 0
+    for m in merged:
+        s, e = m["start"], m["end"]
+        best_spk, best_ov = None, 0.0
+        for ts, te, spk in turns:
+            if te <= s:
+                continue
+            if ts >= e:
+                break  # turns are time-ordered; nothing later can overlap
+            ov = min(e, te) - max(s, ts)
+            if ov > best_ov:
+                best_spk, best_ov = spk, ov
+        if best_spk is None:
+            n_kept += 1
+            out.append(m)
+        else:
+            n_relabeled += 1
+            out.append({**m, "speaker": best_spk})
+    return out, {
+        "n_relabeled": n_relabeled,
+        "n_kept": n_kept,
+        "n_turn_speakers": len({spk for _, _, spk in turns}),
+    }
 
 
 def identify_speakers(

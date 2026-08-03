@@ -12,12 +12,17 @@ the audio to Soniox, and the summarizer choice is a separate question — with
 `stt: soniox` and `summarizer: none` the audio goes out and the transcript
 stays home; the reverse is also possible. docs/privacy.md states both.
 
-Two things the local path has and this one cannot:
-  - **Speaker count is not adjustable.** Soniox exposes diarization as a single
+Optionally the speaker boundaries come back from pyannote instead — the hybrid
+step below, on by default and skipped silently without a Hugging Face token.
+See relabel_by_turns for why it exists.
+
+What this path still cannot do:
+  - **Soniox takes no speaker count.** It exposes diarization as a single
     boolean and detects up to 15 speakers on its own; there is no equivalent of
     pyannote's num_speakers. A count in the filename or spoken at the start of
-    the recording is therefore ignored, and this module says so in the log
-    rather than letting the hint appear to work.
+    the recording reaches pyannote when the hybrid step runs, and is dropped
+    otherwise — the log says which of the two happened rather than letting the
+    hint appear to work.
   - **No glossary in the prompt sense.** The same glossary text is sent as
     Soniox's `context` field, which is close but not the same mechanism.
 """
@@ -30,7 +35,15 @@ import subprocess
 import time
 from pathlib import Path
 
-from .diarize import identify_and_repair, load_initial_prompt, write_outputs
+from .diarize import (
+    diarize_turns,
+    find_hf_token,
+    identify_and_repair,
+    load_initial_prompt,
+    prepare_audio,
+    relabel_by_turns,
+    write_outputs,
+)
 from .speakers.db import SpeakerDB
 from .stt import soniox_client
 
@@ -109,6 +122,64 @@ def normalize_segments(merged: list[dict]) -> list[dict]:
     return out
 
 
+def apply_hybrid_boundaries(
+    input_path: str,
+    merged: list[dict],
+    workspace: Path,
+    num_speakers: int | None = None,
+) -> list[dict]:
+    """Re-label Soniox segments with pyannote's speaker boundaries.
+
+    🔴 Every failure is absorbed, and that is the whole design of this
+    function. No token, no model download, no GPU, a corrupt file, an OOM —
+    each returns the segments untouched and lets the run finish with Soniox's
+    own labels. The transcription has already been paid for and cannot be
+    repeated; an improvement step must never be able to cost it. That is the
+    same rule the transcript-attachment step follows.
+
+    A missing token is the expected case, not an error: it means the user chose
+    Soniox precisely so they would not have to set up pyannote. It is logged at
+    debug level, once, rather than warned about on every recording.
+    """
+    token = find_hf_token(workspace)
+    if not token:
+        logger.debug("hybrid boundaries skipped — no Hugging Face token")
+        return merged
+
+    t0 = time.time()
+    wav = None
+    try:
+        logger.info(
+            "hybrid: re-running pyannote for speaker boundaries"
+            + (f" ({num_speakers} speakers)" if num_speakers else " (auto-detect)")
+        )
+        # 🔴 pyannote needs 16k mono wav. Handing it the original container
+        # fails on the first chunk with a sample-count mismatch, so this goes
+        # through the same prepare_audio the local path uses — absorbing
+        # container decode drift is that function's job, and reimplementing it
+        # here is how that bug comes back. The temp wav is removed either way;
+        # a 140 MB recording expands to roughly twice that.
+        wav = prepare_audio(input_path, os.path.dirname(os.path.abspath(input_path)) or ".")
+        turns = diarize_turns(wav, token, num_speakers)
+        relabeled, stats = relabel_by_turns(merged, turns)
+        logger.info(
+            f"  {stats['n_relabeled']} segments re-labeled, {stats['n_kept']} kept, "
+            f"{stats['n_turn_speakers']} speakers from pyannote ({time.time() - t0:.0f}s)"
+        )
+        return relabeled
+    except Exception as e:  # noqa: BLE001 — see the docstring: never fatal
+        logger.warning(
+            f"hybrid boundaries failed, keeping Soniox labels: {type(e).__name__}: {e}"
+        )
+        return merged
+    finally:
+        if wav and os.path.exists(wav):
+            try:
+                os.remove(wav)
+            except OSError:
+                pass
+
+
 def run_cloud_diarization(
     input_path: str,
     api_key: str,
@@ -119,6 +190,8 @@ def run_cloud_diarization(
     language_hints: list[str] | None = None,
     num_speakers: int | None = None,
     identify: bool = True,
+    workspace: Path | None = None,
+    hybrid: bool = False,
 ) -> dict:
     """Transcribe and diarize one file through Soniox, then identify speakers.
 
@@ -127,9 +200,13 @@ def run_cloud_diarization(
       <prefix>transcript_diarized.txt
       <prefix>speakers.json
 
-    num_speakers is accepted and ignored — see the module docstring. It is in
-    the signature so the caller can pass whatever it parsed without knowing
-    which engine is active, and so the log can name the hint being dropped.
+    num_speakers reaches pyannote when the hybrid step runs and is dropped
+    otherwise — Soniox itself takes no count. It is in the signature either way
+    so the caller can pass what it parsed without knowing which engine is
+    active, and so the log can name where the hint went.
+
+    hybrid needs workspace to find the Hugging Face token; without it the step
+    is skipped as if no token existed.
 
     🔴 Output is written before the remote copies are deleted. Transcription is
     the paid, unrepeatable step; if cleanup hangs or fails, the local files are
@@ -152,7 +229,8 @@ def run_cloud_diarization(
             "in config.yaml to transcribe this one locally."
         )
 
-    if num_speakers:
+    use_hybrid = bool(hybrid and workspace)
+    if num_speakers and not use_hybrid:
         logger.info(
             f"speaker count hint ({num_speakers}) ignored — Soniox detects speakers "
             "itself and takes no count. Use a local backend when the count matters."
@@ -192,8 +270,14 @@ def run_cloud_diarization(
         n_clusters = len({m["speaker"] for m in merged})
         logger.info(f"  {len(merged)} segments, {n_clusters} speakers")
 
+        if use_hybrid:
+            merged = apply_hybrid_boundaries(input_path, merged, workspace, num_speakers)
+
         # Snapshot before names replace ids, so merge detection can still see
-        # which segments came from the same provider cluster.
+        # which segments came from the same provider cluster. Taken after the
+        # hybrid step on purpose: merge detection asks "did one cluster swallow
+        # two people", and the clusters it must reason about are the ones the
+        # labels actually came from.
         raw_labels = [m["speaker"] for m in merged]
         merged, id_mapping, id_sims, merge_info = identify_and_repair(
             input_path, merged, raw_labels, speaker_db, model_dir, identify

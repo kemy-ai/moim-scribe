@@ -36,12 +36,17 @@ language: {language}
 #                 already split by speaker. Needs no Hugging Face token and no
 #                 local model. Fast and accurate when people take turns; in
 #                 testing on a noisy conversation where several people talked
-#                 over each other it merged speakers together. It accepts no
-#                 speaker count, so a count in the filename is ignored.
+#                 over each other it merged speakers together — which is what
+#                 hybrid_diarization below undoes when a token is available.
 #                 Requires an API key — see docs/setup-soniox.md.
 stt_backend: {stt_backend}
 # stt_model: null            # override the backend's default whisper model
 # soniox_region: us          # us | eu | jp (eu and jp need activation by Soniox)
+# hybrid_diarization: true   # soniox only: keep Soniox's text but take pyannote's
+#                            # speaker boundaries. Skipped silently with no Hugging
+#                            # Face token, so it is safe to leave on. This is also
+#                            # the only path on which a filename speaker count is
+#                            # used with soniox.
 
 # Summarizer backend: claude_cli | anthropic_api | ollama | none
 #   claude_cli    your existing Claude Code login — sends the transcript to Anthropic
@@ -276,16 +281,26 @@ def cmd_doctor(args) -> int:
         except ImportError:
             check("stt backend faster-whisper importable", False, 'pip install "moim-scribe[cross]"')
 
-    # 🔴 pyannote and the HF token are only needed to split speakers locally,
-    # which Soniox does server-side. speechbrain is checked either way: the
-    # fingerprint matching that turns SPEAKER_00 into a name runs locally on
-    # both paths, so skipping it here would hide a real breakage.
-    if not cloud:
+    # 🔴 pyannote and the HF token are required to split speakers locally and
+    # optional on the cloud path, where they only sharpen boundaries Soniox has
+    # already drawn. speechbrain is checked either way: the fingerprint matching
+    # that turns SPEAKER_00 into a name runs locally on both paths, so skipping
+    # it here would hide a real breakage.
+    hf_present = bool(os.environ.get("HF_TOKEN")) or (cfg.workspace / ".hf_token").exists()
+    # A token on the cloud path means the user opted into the hybrid step, so
+    # a missing pyannote is a real finding: the step would fail on every
+    # recording and say so only in the log. No token is not a finding — it is
+    # the ordinary shape of a Soniox-only setup, and reported as information.
+    want_pyannote = not cloud or (cfg.hybrid_diarization and hf_present)
+    if want_pyannote:
         try:
             import pyannote.audio  # noqa: F401
             check("pyannote.audio importable", True)
         except ImportError:
             check("pyannote.audio importable", False, "pip install moim-scribe")
+    elif cloud and cfg.hybrid_diarization:
+        print("[i  ] hybrid speaker boundaries idle — no Hugging Face token, so "
+              "Soniox's own speaker labels are used")
     try:
         import speechbrain  # noqa: F401
         check("speechbrain importable", True)
@@ -293,10 +308,9 @@ def cmd_doctor(args) -> int:
         check("speechbrain importable", False, "pip install moim-scribe")
 
     if not cloud:
-        token_present = bool(os.environ.get("HF_TOKEN")) or (cfg.workspace / ".hf_token").exists()
         check(
             "Hugging Face token (HF_TOKEN or <workspace>/.hf_token)",
-            token_present,
+            hf_present,
             "see docs/setup-pyannote.md — token + model terms acceptance are required once",
         )
 
