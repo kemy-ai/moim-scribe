@@ -13,7 +13,7 @@
 ```mermaid
 flowchart TD
     subgraph machine["내 컴퓨터 안"]
-        A["inbox/<br>녹음 파일 도착"] --> B["전사 + 화자분리<br>whisper (mlx / faster) + pyannote"]
+        A["inbox/<br>녹음 파일 도착"] --> B["전사 + 화자분리<br>whisper (mlx / faster) + pyannote<br>(soniox: 텍스트는 Soniox + 화자 경계는 pyannote)"]
         FP[("화자 지문 DB<br>회차마다 축적")] <--> B
         B --> C["모임 양식으로 정리<br>렌즈 · 스타일 · 팩"]
         C --> D["results/<br>정리 md + 전사 txt"]
@@ -41,7 +41,7 @@ flowchart TD
 |---|---|---|
 | macOS (Apple Silicon) | `mlx` (mlx-whisper) | 1급 — 이 구성에서 만들어지고 실운영 검증됨 |
 | Windows / Linux / Intel 맥 | `faster` (faster-whisper) | 설계상 지원, CI 유닛 검증 — 실사용 피드백 환영 |
-| 모든 플랫폼 | `soniox` (클라우드) | 로컬 모델·허깅페이스 토큰 불필요 — 대신 녹음이 업로드됩니다. 아래 참고 |
+| 모든 플랫폼 | `soniox` (클라우드) | 로컬 모델 불필요 — 대신 녹음이 업로드됩니다. 아래 참고 |
 
 pyannote·speechbrain은 PyTorch라 어디서든 돌고(CUDA·MPS·CPU), 폴더 감시는 `watchdog`(3개 OS 네이티브 이벤트)입니다.
 
@@ -51,9 +51,9 @@ pyannote·speechbrain은 PyTorch라 어디서든 돌고(CUDA·MPS·CPU), 폴더 
 |---|---|---|---|
 | `mlx` (Apple Silicon 기본) | 내 컴퓨터 | pyannote, 로컬 | 파일명이나 녹음 앞부분 멘트에서 인원수를 받습니다 |
 | `faster` (그 외 기본) | 내 컴퓨터 | pyannote, 로컬 | 동일 |
-| `soniox` | Soniox 서버 — **녹음이 업로드됩니다** | Soniox가 수행 | pyannote·허깅페이스 토큰·모델 다운로드 전부 불필요. API 키 필요, 오디오 시간당 과금 |
+| `soniox` | Soniox 서버 — **녹음이 업로드됩니다** | Soniox, 또는 토큰이 있으면 로컬 pyannote | 모델 다운로드 불필요. API 키 필요, 오디오 시간당 과금 |
 
-`soniox`를 고르기 전에 알아둘 것이 둘입니다. **한 명씩 순서대로 말하는 대화**에서는 빠르고 정확한데, 여러 사람이 서로 말을 겹쳐 하는 시끄러운 녹음에서는 서로 다른 화자를 하나로 뭉치는 것이 실측으로 확인됐습니다. 그리고 **인원수를 받지 않습니다** — 화자분리가 켜고 끄는 스위치 하나이고 최대 15명까지 스스로 감지하므로, 파일명에 적은 인원수가 이 경로에서는 무시됩니다(무시할 때 로그에 남습니다). 파일 하나당 300분 상한이 있습니다.
+`soniox`는 **한 명씩 순서대로 말하는 대화**에서 빠르고 정확한데, 여러 사람이 서로 말을 겹쳐 하는 시끄러운 녹음에서는 서로 다른 화자를 하나로 뭉치는 것이 실측으로 확인됐습니다. 허깅페이스 토큰이 있으면 moim-scribe가 그 약점을 보완합니다 — Soniox의 텍스트는 그대로 두고 **화자 경계만 로컬 pyannote로 다시 뽑습니다**. 기본으로 켜져 있고, 토큰이 없으면 조용히 건너뛰며, 파일명에 적은 인원수가 이 경로에서 쓰이는 유일한 방법이기도 합니다. Soniox 자체는 인원수를 받지 않습니다(화자분리가 켜고 끄는 스위치 하나이고 최대 15명까지 스스로 감지). 파일 하나당 300분 상한이 있습니다.
 
 설정 방법과 직접 관리해야 하는 용량 상한: [docs/setup-soniox.md](docs/setup-soniox.md)
 
