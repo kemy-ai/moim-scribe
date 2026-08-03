@@ -10,9 +10,15 @@ single most common place setups fail — do these four steps in order.
 > See [setup-soniox.md](setup-soniox.md).
 
 1. Create a free account at [huggingface.co](https://huggingface.co).
-2. Open both model pages **and click "Agree and access repository" on each**:
+2. Open all three model pages **and click "Agree and access repository" on each**:
    - <https://huggingface.co/pyannote/speaker-diarization-3.1>
    - <https://huggingface.co/pyannote/segmentation-3.0>
+   - <https://huggingface.co/pyannote/speaker-diarization-community-1>
+
+   The third one is easy to miss because moim-scribe never names it: the code
+   asks for `speaker-diarization-3.1`, and pyannote.audio 4.x pulls that
+   repository's PLDA assets in as well. It is gated too, so skipping it fails
+   the same way (observed on pyannote.audio 4.0.7, 2026-08-03).
 3. Create a token: Settings → Access Tokens → New token, type **read**.
 4. Give the token to moim-scribe (either way works):
 
