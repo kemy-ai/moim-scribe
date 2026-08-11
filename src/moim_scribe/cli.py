@@ -203,7 +203,27 @@ def cmd_enroll(args) -> int:
     except ValueError as e:
         print(e)
         return 1
-    enroll(args.audio, args.jsonl, mapping, SpeakerDB(cfg.speakers_dir), cfg.embed_model_dir)
+    db = SpeakerDB(cfg.speakers_dir)
+    enroll(args.audio, args.jsonl, mapping, db, cfg.embed_model_dir)
+    # Tagging is a separate write on purpose: enroll() merges embeddings and
+    # knows nothing about groups, and a failed tag must not read as a failed
+    # enrollment — the fingerprint is the part that is expensive to redo.
+    if args.group or args.attends_all:
+        index = db.load_index()
+        tagged = []
+        for name in sorted(set(mapping.values())):
+            entry = index.get(name)
+            if entry is None:
+                continue
+            if args.group:
+                keep = [g for g in entry.get("groups", []) if g != args.group]
+                entry["groups"] = [*keep, args.group]
+            if args.attends_all:
+                entry["attends_all"] = True
+            tagged.append(name)
+        if tagged:
+            db.save_index(index)
+            print(f"tagged {', '.join(tagged)}: {args.group or 'attends-all'}")
     return 0
 
 
@@ -216,8 +236,14 @@ def cmd_speakers(args) -> int:
         print("no speakers enrolled yet (moim-scribe enroll …)")
         return 0
     for name, entry in sorted(index.items()):
+        where = ""
+        if entry.get("attends_all"):
+            where = " [all groups]"
+        elif entry.get("groups"):
+            where = f" [{'/'.join(entry['groups'])}]"
         print(
-            f"{name}: {entry.get('total_sec', 0)}s across {entry.get('n_samples', 0)} recordings "
+            f"{name}{where}: {entry.get('total_sec', 0)}s across "
+            f"{entry.get('n_samples', 0)} recordings "
             f"(updated {str(entry.get('updated', ''))[:10]})"
         )
     return 0
@@ -362,6 +388,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("jsonl", help="the *_transcript_diarized.jsonl next to the recording")
     p.add_argument("mapping", nargs="+", help="SPEAKER_NN=Name …")
     p.add_argument("--workspace", default=".")
+    p.add_argument("--group", help="tag these speakers as belonging to a group "
+                                   "(use the pack name, e.g. --group book-club)")
+    p.add_argument("--attends-all", action="store_true",
+                   help="this person is in every recording (you, usually) — never "
+                        "reported as being from another group")
     p.set_defaults(func=cmd_enroll)
 
     p = sub.add_parser("speakers", help="list enrolled speakers")

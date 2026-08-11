@@ -100,7 +100,12 @@ moim-scribe watch ~/MyMeetings         # 1회만 돌리려면 scan-inbox
 moim-scribe enroll inbox/_done/녹음.m4a results/YYMMDD_녹음_diarized.jsonl \
     SPEAKER_00=김하늘 SPEAKER_02=이바다 --workspace ~/MyMeetings
 
-moim-scribe speakers ~/MyMeetings      # 축적된 지문 확인
+# 선택: 누가 어느 모임 사람인지 태그. 모임 이름은 팩 이름을 그대로 씁니다.
+# --attends-all 은 모든 녹음에 나오는 사람(보통 본인)용입니다.
+moim-scribe enroll … SPEAKER_00=김하늘 --group book-club --workspace ~/MyMeetings
+moim-scribe enroll … SPEAKER_01=박구름 --attends-all --workspace ~/MyMeetings
+
+moim-scribe speakers ~/MyMeetings      # 축적된 지문과 소속 확인
 
 # 이후 회차부터 자동 식별. 완성 전사는 언제든 검증(이쪽이 읽는 것은 .txt):
 moim-scribe verify inbox/_done/녹음.m4a inbox/_done/녹음_transcript_diarized.txt \
@@ -108,6 +113,8 @@ moim-scribe verify inbox/_done/녹음.m4a inbox/_done/녹음_transcript_diarized
 ```
 
 지문 DB를 믿을 수 있게 유지하는 규칙(사람이 확정한 구간만 등록 등)은 [docs/speaker-verification.md](docs/speaker-verification.md)에 있습니다.
+
+**소속 태그는 힌트이지 규칙이 아닙니다.** 지문은 등록된 전원과 대조되므로, DB가 커질수록 다른 모임 사람이 매칭 1위가 되는 일이 생깁니다. 그럴 때 실행 로그에 "누가·어느 모임에서" 한 줄이 남고, **그 외에는 아무것도 바뀌지 않습니다.** 차단하는 설계는 실측 후 버렸습니다 — 두 번째 모임에 가입하거나 게스트로 참석하는 일이 실제로 있고, 점수 구간이 겹치며, 아무도 갱신을 기억 못 한 태그가 맞는 매칭을 조용히 미상으로 만들기 때문입니다. 태그 없는 화자·팩이 안 잡힌 녹음·`--attends-all` 표시된 사람은 검사에서 제외됩니다.
 
 ## 정리 백엔드
 

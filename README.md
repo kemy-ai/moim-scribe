@@ -100,7 +100,12 @@ Results land in `results/` as `YYMMDD_title_type.md` plus the full diarized tran
 moim-scribe enroll inbox/_done/rec.m4a results/YYMMDD_rec_diarized.jsonl \
     SPEAKER_00="Kim Haneul" SPEAKER_02="Lee Bada" --workspace ~/MyMeetings
 
-moim-scribe speakers ~/MyMeetings      # see accumulated fingerprints
+# optional: say which group someone belongs to, using the pack name.
+# --attends-all is for whoever is in every recording (usually you).
+moim-scribe enroll … SPEAKER_00="Kim Haneul" --group book-club --workspace ~/MyMeetings
+moim-scribe enroll … SPEAKER_01="Park Gureum" --attends-all --workspace ~/MyMeetings
+
+moim-scribe speakers ~/MyMeetings      # see accumulated fingerprints and their groups
 
 # from now on those two are auto-identified; verify a finished transcript anytime (this one reads the .txt):
 moim-scribe verify inbox/_done/rec.m4a inbox/_done/rec_transcript_diarized.txt \
@@ -108,6 +113,8 @@ moim-scribe verify inbox/_done/rec.m4a inbox/_done/rec_transcript_diarized.txt \
 ```
 
 Only enroll ranges a human has confirmed — the discipline that keeps the database trustworthy is in [docs/speaker-verification.md](docs/speaker-verification.md).
+
+**Group tags are a hint, not a rule.** A fingerprint is compared against everyone enrolled, so as the database grows a name from another recurring group can win a match. When that happens the run logs a line naming who and from where — and changes nothing else. Blocking on it was measured and rejected: people do join a second group or visit as guests, the score ranges overlap, and a tag nobody remembered to update would silently turn a correct match into an unknown. Untagged speakers, unmatched recordings, and anyone marked `--attends-all` are skipped.
 
 ## Summarizer backends
 

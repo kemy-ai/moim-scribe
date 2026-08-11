@@ -377,6 +377,21 @@ def process_recording(cfg: Config, claimed: Path, type_folder: str) -> Path:
         )
     ctx_block = build_block(cfg.packs_dir, type_folder, title, cfg.language)
 
+    # A fingerprint is compared against everyone enrolled, so as the database
+    # grows a name from a different recurring group can win. Say so; do not act
+    # on it — see speakers/groups.py for why this is a display and not a gate.
+    # The group of this recording is just the pack that matched, so there is
+    # nothing extra to configure, and when no pack matched the check is skipped
+    # rather than guessed at.
+    if stats_path.exists():
+        from .packs import find_matching_pack
+        from .speakers.groups import check_stats_file
+
+        _pack = find_matching_pack(cfg.packs_dir, type_folder, title)
+        _note = check_stats_file(stats_path, _pack.name if _pack else None, db.load_index())
+        if _note:
+            logger.warning(_note)
+
     # The filename is the one name source a human set deliberately, at save
     # time, so for people's names it beats transcription: a self-introduction
     # spoken seconds after someone else's gets pulled toward the wrong surname.

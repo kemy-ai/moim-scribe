@@ -29,6 +29,15 @@ Plus one practical rule: after a bulk label correction, re-read the lines at
 the block boundaries — off-by-one edits at range edges are the most common
 silent error.
 
+5. **Read a similarity list together with who could plausibly be there.** A
+   fingerprint is compared against every enrolled speaker, so when the top
+   matches are all people from your other groups, that is usually not evidence
+   of a mixed-up cluster — it means nobody in the database is a real candidate,
+   which is exactly what a not-yet-enrolled person looks like. Unenrolled voices
+   land in the 0.5-0.6 range against more or less anyone. Tagging speakers at
+   enrollment (`--group`, `--attends-all`) makes the run point this out for you,
+   as a logged line and nothing more.
+
 ## First session with new members — the procedure
 
 1. Process the recording normally (labels will be SPEAKER_NN).
