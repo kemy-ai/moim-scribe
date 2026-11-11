@@ -37,7 +37,7 @@ dependencies = [
 
 [project.optional-dependencies]
 mlx = ["mlx-whisper>=0.4"]           # Apple Silicon STT backend (fastest on M-series)
-cross = ["faster-whisper>=1.0"]      # cross-platform STT backend (Windows / Linux / Intel Mac)
+cross = ["faster-whisper>=1.1"]      # cross-platform STT backend (Windows / Linux); 1.1 added large-v3-turbo
 dev = ["pytest>=8.0", "ruff>=0.4"]
 
 [project.urls]

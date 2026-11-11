@@ -65,7 +65,8 @@ One-shot diarization scripts treat every recording as a room full of strangers. 
 | | STT backend | status |
 |---|---|---|
 | macOS (Apple Silicon) | `mlx` (mlx-whisper) | tier 1 — this is the config the pipeline was built and field-tested on |
-| Windows / Linux / Intel Mac | `faster` (faster-whisper) | supported by design, CI-tested at unit level — field reports welcome |
+| Windows / Linux | `faster` (faster-whisper) | supported by design, CI-tested at unit level; field reports welcome |
+| macOS (Intel) | none | not supported: pyannote.audio 4 needs PyTorch 2.8 or newer, and PyTorch publishes no macOS Intel builds after 2.2.2, so the install cannot resolve |
 | any platform | `soniox` (cloud) | no local model, no Hugging Face token — but the audio is uploaded. See below |
 
 pyannote and speechbrain are PyTorch and run everywhere (CUDA, MPS, CPU). The watcher uses `watchdog` (native events on all three OSes).
@@ -84,7 +85,7 @@ Setup and the quota you have to manage: [docs/setup-soniox.md](docs/setup-soniox
 
 ## Install
 
-You need Python 3.11, 3.12 or 3.13, `git`, and [ffmpeg](https://ffmpeg.org) (it provides `ffmpeg` and `ffprobe`). Each block below starts from nothing: it creates a virtual environment first, so the `moim-scribe` command exists only while that environment is active (activate it again in every new terminal). Use `[mlx]` on an Apple Silicon Mac and `[cross]` everywhere else.
+You need Python 3.11, 3.12 or 3.13, `git`, and [ffmpeg](https://ffmpeg.org) (it provides `ffmpeg` and `ffprobe`). Each block below starts from nothing: it creates a virtual environment first, so the `moim-scribe` command exists only while that environment is active (activate it again in every new terminal). Use `[mlx]` on an Apple Silicon Mac and `[cross]` on Windows and Linux. Intel Macs are not supported (see "Platform support").
 
 **What to expect.** Installing takes a couple of minutes and about 1.6 GB of disk for the virtual environment (measured on Apple Silicon with Python 3.12: 134 s). The first recording downloads about 1.6 GB of models once (measured: about 3 minutes), and the first `enroll` downloads the speaker model (about 170 MB). The first `doctor` can sit silent for up to a minute while it imports the heavy packages.
 
@@ -95,16 +96,6 @@ brew install git ffmpeg
 python3 -m venv ~/moim-scribe-env
 source ~/moim-scribe-env/bin/activate
 pip install "moim-scribe[mlx] @ git+https://github.com/kemy-ai/moim-scribe"
-moim-scribe --version
-```
-
-**macOS, Intel**
-
-```bash
-brew install git ffmpeg
-python3 -m venv ~/moim-scribe-env
-source ~/moim-scribe-env/bin/activate
-pip install "moim-scribe[cross] @ git+https://github.com/kemy-ai/moim-scribe"
 moim-scribe --version
 ```
 
@@ -120,6 +111,8 @@ moim-scribe --version
 ```
 
 Open a new PowerShell window after the winget installs so `git` and `ffmpeg` are on PATH.
+
+If activation fails with "running scripts is disabled on this system", Windows is blocking scripts (the default). Either allow them for the current window only with `Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned` and activate again, or skip activation and call the tools by path, for example `& $HOME\moim-scribe-env\Scripts\pip.exe install ...` and `& $HOME\moim-scribe-env\Scripts\moim-scribe.exe --version`.
 
 **Linux (Debian / Ubuntu shown; use your package manager)**
 
@@ -223,7 +216,7 @@ If a name repeats ("weekly sync.m4a" every week), nothing is overwritten: the se
 | `ollama` | Ollama running locally | no — nothing leaves at this step |
 | `none` | nothing | no — stops at the diarized transcript |
 
-With `claude_cli`, the CLI is started with no tools, no MCP servers, and neither your global instructions nor your user settings, and it runs from an empty temporary directory: the transcript is only ever read as text, and the summary does not depend on how that machine's Claude Code is set up. The summary is written in the language of the transcript. A Claude Code version too old for these flags is refused with a message to update it or choose another summarizer; it is not retried without them.
+With `claude_cli`, the CLI is started with no tools, no MCP servers, neither your global instructions nor your user settings, and no session kept on disk (the prompt is not saved in Claude Code's session history), and it runs from an empty temporary directory: the transcript is only ever read as text, and the summary does not depend on how that machine's Claude Code is set up. The summary is written in the language of the transcript. A Claude Code version too old for these flags is refused with a message to update it or choose another summarizer; it is not retried without them.
 
 Switch in `config.yaml`. The summary template ships in Korean and English (`--language`) and lives in your workspace at `packs/lenses/summary.<language>.md`; edit it to change what every summary looks like. This table is about the transcript only — whether the *audio* leaves is the separate `stt_backend` choice above.
 
@@ -232,7 +225,7 @@ Switch in `config.yaml`. The summary template ships in Korean and English (`--la
 Voice fingerprints are **biometric personal data**, and recordings capture private conversation.
 
 - **Record and enroll only with every participant's consent.** In many jurisdictions this is a legal requirement, not a courtesy — e.g. under Korea's Personal Information Protection Act, voiceprints used to identify a person are sensitive biometric information requiring separate explicit consent.
-- Fingerprinting is always local, and after the first model download that step is forced offline. Two steps can reach the network, and only if you configure them to: `stt_backend: soniox` uploads the **audio**, and a cloud summarizer sends the **transcript** (with the recording title and time, speaker statistics, and your pack background when a pack matches). The defaults keep the audio home.
+- Fingerprinting is always local, and after the first model download that step is forced offline. Two steps can reach the network, and only if you configure them to: `stt_backend: soniox` uploads the **audio** (and `glossary.txt` as context, if you keep one), and a cloud summarizer sends the **transcript** (with the recording title and time, speaker statistics, and your pack background when a pack matches). The defaults keep the audio home.
 - The workspace keeps fingerprints (`speakers/`), recordings, and rosters outside the repo, and `init` drops a defensive `.gitignore` in the workspace (it also covers `packs/` and `glossary.txt`). Never publish a workspace.
 
 Details: [docs/privacy.md](docs/privacy.md).
@@ -257,13 +250,13 @@ Best-effort: issues and PRs are read, response time is not guaranteed. Forks wel
 
 0.2 removes recording types, but an upgrade changes nothing about which files are processed or summarized until you opt in:
 
-- **If `config.yaml` still has a `types:` block**, exactly the subfolders it names are scanned, as in 0.1: not `inbox/` itself and not other subfolders. Folder names are compared ignoring case and Unicode form (`Private` matches `private`). A folder mapped to `null` (by default `inbox/transcript/`) stays transcript-only, so those transcripts never start going to a summarizer. The block no longer selects a lens, and a log line says so. If recordings sit in `inbox/` itself or in other subfolders while the block is there, every pass logs one warning with their count and the remedy: delete the `types:` block from `config.yaml` to use the flat inbox. For transcripts only everywhere, set `summarizer: none`.
+- **If `config.yaml` still has a `types:` block**, exactly the subfolders it names are scanned, as in 0.1: not `inbox/` itself and not other subfolders. Folder names are compared ignoring case and Unicode form (`Private` matches `private`). A folder mapped to `null` (by default `inbox/transcript/`) stays transcript-only, so those transcripts never start going to a summarizer. The block no longer selects a lens, and a log line says so. A `types:` line with nothing after it meant 0.1's built-in map and is still read that way: the folders `meeting`, `gathering` and `transcript` are scanned, and `transcript` is transcript-only. If recordings sit in `inbox/` itself or in other subfolders while the block is there, every pass logs one warning with their count and the remedy: delete the `types:` block from `config.yaml` to use the flat inbox. For transcripts only everywhere, set `summarizer: none`.
 - **Without a `types:` block** (a new 0.2 workspace, or after you delete it), `inbox/` and its direct subfolders are scanned, and recordings are processed the same wherever they sit.
 - **Lenses.** `meeting`, `gathering` and `conversation` are gone, along with `packs/styles/`. Run `moim-scribe init <workspace>` again: it adds the missing lens files and never touches `config.yaml`. A workspace with no `packs/lenses/summary.<language>.md` uses the built-in one meanwhile. Old lens files left in `packs/lenses/` are harmless and unused.
 - **Packs.** `"type"` and `"style"` in `match.json` are ignored; the title keyword alone decides.
 - **File names.** Summaries are now `YYMMDD_title_summary.md`.
 - **`moim-scribe process`** no longer needs `--type` (it is accepted and ignored). It works on a private copy and refuses a file that is inside the workspace `inbox/`.
-- **`init` is safe to run again.** It never overwrites `config.yaml`, it adds missing lens files and `.gitignore` entries, and `--force` is now a no-op. `--reset-config` writes a fresh config after saving the old one as `config.yaml.bak`.
+- **`init` is safe to run again.** It never overwrites `config.yaml`, it adds missing lens files and `.gitignore` entries, and `--force` is now a no-op. `--reset-config` writes a fresh config after saving the old one as `config.yaml.bak`; an existing backup is never overwritten (the next ones are `config.yaml.bak.2`, `config.yaml.bak.3`, ...), and the command prints the name it used. The fresh config gets the language given with `--language` (default `ko`), and the command says which one it wrote.
 - **`config.yaml` is validated when loaded.** An unknown key is reported, a wrong value is an error before anything is transcribed, `summarizer: null` means `none`, and `stt` is accepted as another spelling of `stt_backend`.
 
 ## Roadmap (not in v0.2)

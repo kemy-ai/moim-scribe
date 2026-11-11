@@ -44,7 +44,7 @@ CONFIG_TEMPLATE = """\
 language: {language}
 
 # STT backend: "mlx" (Apple Silicon, install moim-scribe[mlx])
-#              "faster" (Windows / Linux / Intel Mac, install moim-scribe[cross])
+#              "faster" (Windows / Linux, install moim-scribe[cross])
 #              "soniox" (cloud): UPLOADS THE AUDIO to Soniox, which returns it
 #                 already split by speaker. Needs no Hugging Face token and no
 #                 local model. Fast and accurate when people take turns; in
@@ -82,12 +82,14 @@ default_speakers: 0
 # file and appends whichever are missing from an existing one, so a workspace
 # created by an older version gains each new entry the next time init runs.
 # packs/ holds rosters and private notes (docs/privacy.md: never publish them),
-# glossary.txt holds names of people and places.
+# glossary.txt holds names of people and places. .process-*/ is the private
+# work folder of `moim-scribe process`; a run that is killed leaves transcript
+# work products in it.
 GITIGNORE_ENTRIES = (
     "speakers/", "*.npy", "inbox/", "results/", "models/", "packs/", "glossary.txt",
     "*.wav", "*.m4a", "*.mp3", "*.flac", "*.ogg", "*.aac", "*.opus",
     ".hf_token", ".soniox_key",
-    "_history/",
+    "_history/", ".process-*/",
 )
 
 # Loggers that report every HTTP request at INFO (one line per request, 22 on a
@@ -150,8 +152,14 @@ def _repair_gitignore(ws: Path) -> None:
         print(f"  added to .gitignore: {', '.join(missing)}")
 
 
-def _copy_shipped_files(packs_dir: Path, announce: bool) -> None:
-    """Copy the shipped lens files and example packs that are not there yet."""
+def _copy_shipped_files(packs_dir: Path, announce: bool, examples: bool) -> None:
+    """Copy the shipped lens files that are not there yet, and the example packs.
+
+    The lens files are needed by every recording, so a missing one is always
+    restored. The example packs are only a demonstration: they are installed
+    on the first init and never again, so a user who deleted one keeps it
+    deleted.
+    """
     templates = importlib.resources.files("moim_scribe") / "templates"
     dst_dir = packs_dir / "lenses"
     dst_dir.mkdir(parents=True, exist_ok=True)
@@ -161,6 +169,8 @@ def _copy_shipped_files(packs_dir: Path, announce: bool) -> None:
             dst.write_text(item.read_text(encoding="utf-8"), encoding="utf-8")
             if announce:
                 print(f"  added {dst.relative_to(packs_dir.parent)}")
+    if not examples:
+        return
     # An example pack is copied as a whole, only when its folder is absent: a
     # user who edited it keeps their version.
     for pack in templates.joinpath("examples").iterdir():
@@ -170,6 +180,20 @@ def _copy_shipped_files(packs_dir: Path, announce: bool) -> None:
         dst_pack.mkdir(parents=True)
         for item in pack.iterdir():
             (dst_pack / item.name).write_text(item.read_text(encoding="utf-8"), encoding="utf-8")
+
+
+def _free_backup_name(cfg_path: Path) -> Path:
+    """config.yaml.bak, or the first of .bak.2, .bak.3, ... that does not exist.
+
+    A backup is never overwritten: resetting twice must not lose the config
+    the user had before the first reset.
+    """
+    bak = cfg_path.with_name(f"{cfg_path.name}.bak")
+    n = 2
+    while bak.exists() or bak.is_symlink():
+        bak = cfg_path.with_name(f"{cfg_path.name}.bak.{n}")
+        n += 1
+    return bak
 
 
 def cmd_init(args) -> int:
@@ -182,6 +206,9 @@ def cmd_init(args) -> int:
     ws = Path(args.workspace or ".").expanduser().resolve()
     force = getattr(args, "force", False)
     reset = getattr(args, "reset_config", False)
+    language_given = getattr(args, "language_given", True)
+    if args.language is None:
+        args.language = "ko"
     ws.mkdir(parents=True, exist_ok=True)
     cfg_path = ws / CONFIG_NAME
     existed = cfg_path.exists()
@@ -194,7 +221,7 @@ def cmd_init(args) -> int:
         print(f"{CONFIG_NAME} already exists in {ws}: left untouched")
     else:
         if cfg_path.exists():
-            bak = ws / f"{CONFIG_NAME}.bak"
+            bak = _free_backup_name(cfg_path)
             shutil.copy2(cfg_path, bak)
             print(f"old {CONFIG_NAME} saved as {bak}")
         stt_backend = default_stt_backend()
@@ -203,6 +230,11 @@ def cmd_init(args) -> int:
             encoding="utf-8",
         )
         wrote = True
+        if existed and not language_given:
+            # A reset without --language would otherwise quietly turn an
+            # English workspace into a Korean one.
+            print(f"note: the fresh {CONFIG_NAME} uses language {args.language} (the default); "
+                  "pass --language to choose it, e.g. --reset-config --language en")
         print(f"wrote {cfg_path}: language {args.language}, stt_backend {stt_backend} "
               "(audio stays on this machine), summarizer claude_cli (sends the transcript "
               "to Anthropic)")
@@ -213,7 +245,7 @@ def cmd_init(args) -> int:
     # even when the existing config.yaml turns out to be unusable below.
     skeleton = Config(workspace=ws)
     ensure_workspace_dirs(skeleton)
-    _copy_shipped_files(skeleton.packs_dir, announce=existed)
+    _copy_shipped_files(skeleton.packs_dir, announce=existed, examples=not existed)
     # A workspace-local safety net in case the user ever runs `git init` here.
     _repair_gitignore(ws)
     # Raises ConfigError for a config.yaml that cannot be used: the one the
@@ -264,11 +296,20 @@ def cmd_scan_inbox(args) -> int:
 
 
 def _inside(path: Path, folder: Path) -> bool:
-    try:
-        path.relative_to(folder.resolve())
-        return True
-    except ValueError:
-        return False
+    """True if `path` lies anywhere below `folder`, decided by file identity.
+
+    Comparing path strings is not enough: on a case-insensitive or
+    normalization-insensitive filesystem (macOS, Windows) `WS/INBOX/a.m4a`
+    and a workspace path typed with different case or Unicode form name the
+    same folder while the strings differ.
+    """
+    for parent in path.parents:
+        try:
+            if os.path.samefile(parent, folder):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def cmd_process(args) -> int:
@@ -421,25 +462,57 @@ LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1", "0.0.0.0", "")
 
 
 def data_flow(cfg: Config) -> list[str]:
-    """Where the audio and the transcript go under this config, in plain words."""
-    if cfg.stt_backend == "soniox":
-        audio = f"audio: UPLOADED to Soniox (stt_backend: soniox, region {cfg.soniox_region})"
+    """Where the audio and the transcript go under this config, in plain words.
+
+    Each line has to be literally true for every combination of STT backend
+    and summarizer. With Soniox the transcript is made on Soniox's servers, so
+    it does not "stay on this machine" even with summarizer: none.
+    """
+    cloud = cfg.stt_backend == "soniox"
+    lines = []
+    if cloud:
+        lines.append(
+            f"audio: UPLOADED to Soniox (stt_backend: soniox, region {cfg.soniox_region}); "
+            "once a recording is transcribed (or fails), this tool asks Soniox to delete "
+            "the upload and the transcription"
+        )
+        if cfg.glossary_path.exists():
+            lines.append("glossary.txt: sent to Soniox with each recording, as context")
     else:
-        audio = f"audio: stays on this machine (stt_backend: {cfg.stt_backend})"
+        lines.append(f"audio: stays on this machine (stt_backend: {cfg.stt_backend})")
+
+    # Where the summary step sends the transcript; None = nowhere off this machine.
     if cfg.summarizer in ("claude_cli", "anthropic_api"):
-        transcript = f"transcript: sent to Anthropic ({cfg.summarizer})"
+        sent_to = f"Anthropic for the summary ({cfg.summarizer})"
+        local_note = None
     elif cfg.summarizer == "ollama":
         from .summarize.ollama import DEFAULT_HOST
 
         raw = (os.environ.get("OLLAMA_HOST") or DEFAULT_HOST).strip()
         host = urlsplit(raw if "://" in raw else f"http://{raw}").hostname or ""
         if host in LOCAL_HOSTS:
-            transcript = "transcript: stays on this machine (ollama)"
+            sent_to, local_note = None, "ollama"
         else:
-            transcript = f"transcript: sent to the Ollama server at {raw} (OLLAMA_HOST)"
+            sent_to = f"the Ollama server at {raw} for the summary (OLLAMA_HOST)"
+            local_note = None
     else:
-        transcript = "transcript: stays on this machine (summarizer: none)"
-    return [audio, transcript]
+        sent_to, local_note = None, "summarizer: none"
+
+    if cloud:
+        made = ("made by Soniox on its servers (deletion there requested as above), "
+                "saved in results/")
+        if sent_to:
+            tail = f"then sent to {sent_to}"
+        elif cfg.summarizer == "ollama":
+            tail = "summarized on this machine (ollama)"
+        else:
+            tail = "no summary (summarizer: none)"
+        lines.append(f"transcript: {made}; {tail}")
+    elif sent_to:
+        lines.append(f"transcript: made on this machine, then sent to {sent_to}")
+    else:
+        lines.append(f"transcript: stays on this machine ({local_note})")
+    return lines
 
 
 def _import_error(name: str) -> str | None:
@@ -595,12 +668,13 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("init", help="create a workspace skeleton, or repair an existing one")
     p.add_argument("workspace", nargs="?", default=".")
-    p.add_argument("--language", default="ko", help="ko / en (default: ko)")
+    p.add_argument("--language", default=None, help="ko / en (default: ko)")
     p.add_argument("--force", action="store_true",
                    help="no longer resets config.yaml (kept so old scripts run); "
                         "see --reset-config")
     p.add_argument("--reset-config", action="store_true",
-                   help="write a fresh config.yaml, keeping the old one as config.yaml.bak")
+                   help="write a fresh config.yaml, keeping the old one as config.yaml.bak "
+                        "(or .bak.2, .bak.3, ... when that exists: no backup is overwritten)")
     p.set_defaults(func=cmd_init)
 
     p = sub.add_parser("watch", help="watch the inbox and process recordings")
@@ -660,6 +734,8 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=cmd_doctor)
 
     args = ap.parse_args(argv)
+    if args.command == "init":
+        args.language_given = args.language is not None
     _setup_logging(args.verbose)
     try:
         return args.func(args)

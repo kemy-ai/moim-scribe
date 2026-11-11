@@ -27,7 +27,7 @@ GATED_HF_REPOS = (
 
 
 def clean_secret(raw: bytes) -> str | None:
-    """Decode secret-file bytes and return the cleaned value, or None if empty."""
+    """Decode secret-file bytes and return the first non-comment line, or None if empty."""
     if raw.startswith(codecs.BOM_UTF8):
         text = raw[len(codecs.BOM_UTF8):].decode("utf-8", errors="replace")
     elif raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
@@ -37,7 +37,9 @@ def clean_secret(raw: bytes) -> str | None:
     text = text.replace("\x00", "").replace("﻿", "")
     for line in text.splitlines():
         line = line.strip()
-        if line:
+        # A user may put a note above the token ("# read token, made 2024").
+        # No token or API key starts with "#".
+        if line and not line.startswith("#"):
             return line
     return None
 

@@ -36,7 +36,7 @@ def test_links_become_real_files_with_the_same_bytes(tmp_path):
         f = model / name
         assert not f.is_symlink() and f.read_bytes() == body
     assert (model / "hyperparams.yaml").read_text(encoding="utf-8") == "already a file"
-    assert not list(model.glob("*.copying"))          # no temp files left
+    assert not list(model.glob("*.copying*"))         # no temp files left
 
 
 def test_the_model_survives_the_cache_being_deleted(tmp_path):

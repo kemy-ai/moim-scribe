@@ -52,11 +52,15 @@ directories of `ffmpeg` and `claude` (the default summarizer) are visible: add a
 `scan-inbox` logs the setup problem, exits 1, and leaves every recording where
 it is.
 
-If the workspace or its inbox is in a cloud-synced folder (iCloud Drive, Google
-Drive, Dropbox), macOS may refuse a launchd job access to it silently. Grant Full
+A launchd job that reads a protected folder can fail with "Operation not
+permitted" in its log. For `~/Documents` this is a documented case: grant Full
 Disk Access to the program that runs the job (System Settings, Privacy &
 Security, Full Disk Access; add the Python in your virtual environment or the
-executable above), then reload the job.
+executable above) and reload the job, or keep the workspace in a folder that is
+not protected. For a workspace or inbox in a cloud-synced folder
+(`~/Library/CloudStorage`, iCloud Drive), check by running the job once
+(`launchctl kickstart gui/$(id -u)/com.moim-scribe`) and reading its log (the
+`StandardErrorPath` file above) before relying on it.
 
 ## Linux — systemd user timer
 

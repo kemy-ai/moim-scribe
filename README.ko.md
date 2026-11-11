@@ -65,7 +65,8 @@ flowchart TD
 | | STT 백엔드 | 상태 |
 |---|---|---|
 | macOS (Apple Silicon) | `mlx` (mlx-whisper) | 1급 — 이 구성에서 만들어지고 실운영 검증됨 |
-| Windows / Linux / Intel 맥 | `faster` (faster-whisper) | 설계상 지원, CI 유닛 검증 — 실사용 피드백 환영 |
+| Windows / Linux | `faster` (faster-whisper) | 설계상 지원, CI 유닛 검증. 실사용 피드백 환영 |
+| macOS (Intel) | 없음 | 지원하지 않음: pyannote.audio 4는 PyTorch 2.8 이상이 필요한데 PyTorch는 2.2.2 이후 macOS Intel용 빌드를 내지 않아 설치가 성립하지 않습니다 |
 | 모든 플랫폼 | `soniox` (클라우드) | 로컬 모델 불필요 — 대신 녹음이 업로드됩니다. 아래 참고 |
 
 pyannote·speechbrain은 PyTorch라 어디서든 돌고(CUDA·MPS·CPU), 폴더 감시는 `watchdog`(3개 OS 네이티브 이벤트)입니다.
@@ -84,7 +85,7 @@ pyannote·speechbrain은 PyTorch라 어디서든 돌고(CUDA·MPS·CPU), 폴더 
 
 ## 설치
 
-Python 3.11, 3.12 또는 3.13, `git`, [ffmpeg](https://ffmpeg.org)(`ffmpeg`와 `ffprobe`가 함께 설치됩니다)가 필요합니다. 아래 블록은 모두 아무것도 없는 상태에서 시작하며, 먼저 가상환경을 만듭니다. 따라서 `moim-scribe` 명령은 그 가상환경이 활성화된 동안에만 있습니다(새 터미널을 열 때마다 다시 활성화하세요). Apple Silicon 맥은 `[mlx]`, 그 외에는 모두 `[cross]`를 씁니다.
+Python 3.11, 3.12 또는 3.13, `git`, [ffmpeg](https://ffmpeg.org)(`ffmpeg`와 `ffprobe`가 함께 설치됩니다)가 필요합니다. 아래 블록은 모두 아무것도 없는 상태에서 시작하며, 먼저 가상환경을 만듭니다. 따라서 `moim-scribe` 명령은 그 가상환경이 활성화된 동안에만 있습니다(새 터미널을 열 때마다 다시 활성화하세요). Apple Silicon 맥은 `[mlx]`, Windows와 Linux는 `[cross]`를 씁니다. Intel 맥은 지원하지 않습니다("플랫폼 지원" 참고).
 
 **미리 알아둘 것.** 설치에는 몇 분이 걸리고 가상환경에 디스크 약 1.6 GB가 듭니다(Apple Silicon, Python 3.12 실측: 134초). 첫 녹음을 처리할 때 모델 약 1.6 GB를 한 번 내려받고(실측 약 3분), 첫 `enroll`에서는 화자 모델(약 170 MB)을 내려받습니다. 첫 `doctor`는 무거운 패키지를 불러오느라 최대 1분 동안 아무 출력 없이 멈춰 있을 수 있습니다.
 
@@ -95,16 +96,6 @@ brew install git ffmpeg
 python3 -m venv ~/moim-scribe-env
 source ~/moim-scribe-env/bin/activate
 pip install "moim-scribe[mlx] @ git+https://github.com/kemy-ai/moim-scribe"
-moim-scribe --version
-```
-
-**macOS, Intel**
-
-```bash
-brew install git ffmpeg
-python3 -m venv ~/moim-scribe-env
-source ~/moim-scribe-env/bin/activate
-pip install "moim-scribe[cross] @ git+https://github.com/kemy-ai/moim-scribe"
 moim-scribe --version
 ```
 
@@ -120,6 +111,8 @@ moim-scribe --version
 ```
 
 winget으로 설치한 뒤에는 `git`과 `ffmpeg`가 PATH에 잡히도록 PowerShell 창을 새로 여세요.
+
+활성화할 때 "이 시스템에서 스크립트를 실행할 수 없으므로"(running scripts is disabled on this system) 오류가 나면 Windows가 기본 설정으로 스크립트 실행을 막고 있는 것입니다. 지금 연 창에서만 허용하려면 `Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned`를 실행한 뒤 다시 활성화하세요. 아니면 활성화를 건너뛰고 경로로 직접 부르면 됩니다. 예: `& $HOME\moim-scribe-env\Scripts\pip.exe install ...`, `& $HOME\moim-scribe-env\Scripts\moim-scribe.exe --version`
 
 **Linux (Debian / Ubuntu 예시, 다른 배포판은 해당 패키지 관리자 사용)**
 
@@ -223,7 +216,7 @@ jsonl에 없는 라벨도 거부됩니다. 같은 명령의 나머지 사람은 
 | `ollama` | 로컬 Ollama 실행 | 안 나감 — 이 단계에서 나가는 것 없음 |
 | `none` | 없음 | 안 나감 — 화자분리 전사까지만 |
 
-`claude_cli`는 CLI를 도구 없이, MCP 서버 없이, 내 전역 지침과 사용자 설정 없이 실행하며, 빈 임시 폴더에서 돌립니다. 전사본은 글로만 읽히고, 요약이 그 컴퓨터의 Claude Code 설정에 따라 달라지지 않습니다. 요약은 전사본의 언어로 쓰입니다. 이 옵션들을 모르는 옛 버전의 Claude Code는 업데이트하거나 다른 정리 백엔드를 고르라는 안내와 함께 거부되며, 옵션 없이 다시 시도하지 않습니다.
+`claude_cli`는 CLI를 도구 없이, MCP 서버 없이, 내 전역 지침과 사용자 설정 없이, 디스크에 세션을 남기지 않게(프롬프트가 Claude Code 세션 기록에 저장되지 않음) 실행하며, 빈 임시 폴더에서 돌립니다. 전사본은 글로만 읽히고, 요약이 그 컴퓨터의 Claude Code 설정에 따라 달라지지 않습니다. 요약은 전사본의 언어로 쓰입니다. 이 옵션들을 모르는 옛 버전의 Claude Code는 업데이트하거나 다른 정리 백엔드를 고르라는 안내와 함께 거부되며, 옵션 없이 다시 시도하지 않습니다.
 
 `config.yaml`에서 교체합니다. 요약 양식은 한국어·영어 둘 다 내장이고, 워크스페이스의 `packs/lenses/summary.<언어>.md`에 있습니다. 이 파일을 고치면 모든 요약의 형식이 바뀝니다. 이 표는 **전사본**에 대한 것이고, **녹음 파일**이 나가는지는 위의 `stt_backend` 선택이 결정합니다.
 
@@ -232,7 +225,7 @@ jsonl에 없는 라벨도 거부됩니다. 같은 명령의 나머지 사람은 
 음성 지문은 **생체정보(민감 개인정보)**이고, 녹음에는 사적 대화가 담깁니다.
 
 - **녹음과 지문 등록은 모든 참가자의 동의를 받고 하세요.** 여러 나라에서 이것은 매너가 아니라 법적 요건입니다 — 한국 개인정보보호법상 개인을 식별하는 음성 특징 정보는 민감정보(생체인식정보)로 별도의 명시적 동의가 필요합니다.
-- 지문화는 항상 로컬이고, 최초 모델 다운로드 후에는 그 단계가 강제 오프라인으로 동작합니다. 네트워크에 닿을 수 있는 단계는 둘이며 직접 그렇게 설정했을 때만 그렇습니다 — `stt_backend: soniox`는 **녹음 파일**을, 클라우드 정리 백엔드는 **전사본**(과 녹음 제목·시각, 화자 통계, 팩이 매칭되면 그 배경지식)을 보냅니다. 기본 설정은 녹음을 내보내지 않습니다.
+- 지문화는 항상 로컬이고, 최초 모델 다운로드 후에는 그 단계가 강제 오프라인으로 동작합니다. 네트워크에 닿을 수 있는 단계는 둘이며 직접 그렇게 설정했을 때만 그렇습니다 — `stt_backend: soniox`는 **녹음 파일**을(`glossary.txt`가 있으면 그 내용도 참고 문맥으로), 클라우드 정리 백엔드는 **전사본**(과 녹음 제목·시각, 화자 통계, 팩이 매칭되면 그 배경지식)을 보냅니다. 기본 설정은 녹음을 내보내지 않습니다.
 - 지문(`speakers/`)·녹음·명단은 리포 밖 워크스페이스에 있고, `init`이 방어용 `.gitignore`까지 깔아줍니다(`packs/`와 `glossary.txt`도 포함). 워크스페이스를 공개 저장소에 올리지 마세요.
 
 상세: [docs/privacy.md](docs/privacy.md)
@@ -257,13 +250,13 @@ best-effort로 운영합니다: 이슈·PR은 읽지만 응답 기한은 보장�
 
 0.2에서 녹음 유형이 없어졌지만, 직접 선택하기 전에는 어떤 파일이 처리되고 요약되는지가 업그레이드로 달라지지 않습니다:
 
-- **`config.yaml`에 `types:` 블록이 남아 있으면** 0.1처럼 그 블록에 적힌 하위 폴더만 훑습니다. `inbox/` 바로 아래 파일이나 다른 하위 폴더는 훑지 않습니다. 폴더 이름은 대소문자와 유니코드 형태를 무시하고 비교합니다(`Private`는 `private`와 일치). `null`로 지정돼 있던 폴더(기본값은 `inbox/transcript/`)는 전사 전용으로 유지되므로, 그 전사본이 요약 백엔드로 나가기 시작하지 않습니다. 이 블록은 더 이상 렌즈를 고르지 않으며 로그에 그 사실이 한 줄 나옵니다. 블록이 있는 채로 `inbox/` 바로 아래나 다른 하위 폴더에 녹음이 있으면, 순회마다 그 개수와 해결책을 담은 경고가 한 줄 나옵니다. 해결책은 `config.yaml`에서 `types:` 블록을 지워 평평한 inbox를 쓰는 것입니다. 전체를 전사만 하려면 `summarizer: none`으로 두세요.
+- **`config.yaml`에 `types:` 블록이 남아 있으면** 0.1처럼 그 블록에 적힌 하위 폴더만 훑습니다. `inbox/` 바로 아래 파일이나 다른 하위 폴더는 훑지 않습니다. 폴더 이름은 대소문자와 유니코드 형태를 무시하고 비교합니다(`Private`는 `private`와 일치). `null`로 지정돼 있던 폴더(기본값은 `inbox/transcript/`)는 전사 전용으로 유지되므로, 그 전사본이 요약 백엔드로 나가기 시작하지 않습니다. 이 블록은 더 이상 렌즈를 고르지 않으며 로그에 그 사실이 한 줄 나옵니다. `types:` 뒤에 아무것도 적혀 있지 않으면 0.1의 기본 지정으로 읽습니다(0.1에서도 그런 뜻이었습니다). 즉 `meeting`, `gathering`, `transcript` 폴더를 훑고, `transcript`는 전사 전용입니다. 블록이 있는 채로 `inbox/` 바로 아래나 다른 하위 폴더에 녹음이 있으면, 순회마다 그 개수와 해결책을 담은 경고가 한 줄 나옵니다. 해결책은 `config.yaml`에서 `types:` 블록을 지워 평평한 inbox를 쓰는 것입니다. 전체를 전사만 하려면 `summarizer: none`으로 두세요.
 - **`types:` 블록이 없으면**(새 0.2 워크스페이스이거나 블록을 지운 뒤) `inbox/`와 그 바로 아래 하위 폴더를 훑고, 녹음은 어디에 있든 똑같이 처리됩니다.
 - **렌즈.** `meeting`, `gathering`, `conversation`과 `packs/styles/`가 없어졌습니다. `moim-scribe init <워크스페이스>`를 다시 실행하세요. 빠진 렌즈 파일을 추가하고 `config.yaml`은 건드리지 않습니다. `packs/lenses/summary.<언어>.md`가 없는 워크스페이스는 그동안 내장 양식을 씁니다. `packs/lenses/`에 남은 옛 렌즈 파일은 쓰이지 않으며 그대로 둬도 됩니다.
 - **팩.** `match.json`의 `"type"`과 `"style"`은 무시됩니다. 제목 키워드만으로 매칭합니다.
 - **파일명.** 요약은 이제 `YYMMDD_제목_summary.md`입니다.
 - **`moim-scribe process`** 에 `--type`이 필요 없습니다(넣어도 무시됩니다). 비공개 사본으로 작업하며, 워크스페이스 `inbox/` 안의 파일은 거부합니다.
-- **`init`은 다시 실행해도 안전합니다.** `config.yaml`을 덮어쓰지 않고, 빠진 렌즈 파일과 `.gitignore` 항목만 추가하며, `--force`는 이제 아무 일도 하지 않습니다. `--reset-config`는 옛 파일을 `config.yaml.bak`으로 저장한 뒤 새 설정을 씁니다.
+- **`init`은 다시 실행해도 안전합니다.** `config.yaml`을 덮어쓰지 않고, 빠진 렌즈 파일과 `.gitignore` 항목만 추가하며, `--force`는 이제 아무 일도 하지 않습니다. `--reset-config`는 옛 파일을 `config.yaml.bak`으로 저장한 뒤 새 설정을 씁니다. 이미 있는 백업은 덮어쓰지 않고 다음 이름(`config.yaml.bak.2`, `config.yaml.bak.3`, ...)을 쓰며, 어떤 이름으로 저장했는지 출력합니다. 새 설정의 언어는 `--language`로 정하고(기본 `ko`), 어떤 언어로 썼는지도 출력합니다.
 - **`config.yaml`은 불러올 때 검증됩니다.** 모르는 키는 알려 주고, 잘못된 값은 전사를 시작하기 전에 오류가 되며, `summarizer: null`은 `none`으로 읽고, `stt`는 `stt_backend`의 다른 표기로 받아들입니다.
 
 ## 로드맵 (v0.2 범위 밖)

@@ -22,6 +22,10 @@ that is already split by speaker.
   conversations, read [privacy.md](privacy.md) first and say so when you ask
   the other people for consent — "the recording is uploaded for transcription"
   is a separate thing to agree to from "the transcript is sent to an AI".
+- **What Soniox receives:** the audio file, and the text of `glossary.txt` as
+  context when the workspace has one. Soniox writes the transcript on its
+  servers and moim-scribe downloads it. Voice fingerprints never go there:
+  matching voices to names runs on your machine.
 - **Speakers can be merged on noisy recordings.** In testing, a conversation
   where several people talked over each other came back with distinct speakers
   fused into one. Where turn-taking is clean it did well. If you have a Hugging
@@ -119,8 +123,11 @@ never allowed to cost it.
 
 ### The storage cap is the one that bites
 
-Because uploads persist until deleted, moim-scribe deletes both the file and
-the transcription at the end of every run — including when the run fails. That
+Because uploads persist until deleted, moim-scribe asks Soniox to delete both
+the uploaded file and the transcription as soon as a recording's Soniox step
+ends, including when it failed (the local result files are written first).
+A transcription that is still processing is retried a few times before the
+delete is given up. That
 is not tidiness; without it the account fills up and transcription stops
 working.
 
