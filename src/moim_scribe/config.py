@@ -21,10 +21,16 @@ commit.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import platform
+import sys
+import unicodedata
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+from .stt.base import DEFAULT_MODELS as _STT_MODELS
+from .summarize.base import DEFAULT_MODELS as _SUMMARIZER_MODELS
 
 logger = logging.getLogger("moim_scribe.config")
 
@@ -37,6 +43,49 @@ SUMMARY_LENS = "summary"
 
 CONFIG_NAME = "config.yaml"
 
+# Valid config values, derived from the backend registries so a new backend
+# only has to be registered once. "soniox" is dispatched separately in the
+# pipeline (it is not a whisper backend), "none" skips summarizing.
+KNOWN_STT_BACKENDS = tuple(_STT_MODELS) + ("soniox",)
+KNOWN_SUMMARIZERS = tuple(_SUMMARIZER_MODELS) + ("none",)
+
+# Every top-level key load_config understands (anything else gets a warning).
+_SCALAR_KEYS = (
+    "language",
+    "stt_backend",
+    "stt_model",
+    "soniox_region",
+    "hybrid_diarization",
+    "summarizer",
+    "summarizer_model",
+    "summarizer_timeout_sec",
+    "default_speakers",
+)
+_KNOWN_KEYS = frozenset(_SCALAR_KEYS) | {"stt", "types"}
+
+
+class ConfigError(ValueError):
+    """config.yaml is unusable. The message says what to fix; the CLI prints it."""
+
+
+def default_stt_backend() -> str:
+    """mlx only where mlx-whisper can run (macOS on Apple Silicon), else faster."""
+    if sys.platform == "darwin" and platform.machine() == "arm64":
+        return "mlx"
+    return "faster"
+
+
+def normalize_folder_name(name: str) -> str:
+    """Key for comparing inbox folder names with names from a legacy `types:` block.
+
+    NFC + casefold, so `Private` matches `private` and a composed Hangul name
+    matches the decomposed form some filesystems report. Callers must pass the
+    folder name through this same function before testing membership in
+    `Config.legacy_type_folders` / `Config.transcript_only_folders`.
+    """
+    return unicodedata.normalize("NFC", str(name)).casefold()
+
+
 AUDIO_EXTS = (".m4a", ".mp3", ".wav", ".flac", ".ogg", ".aac", ".opus")
 
 
@@ -48,7 +97,7 @@ class Config:
     # Soniox, which returns it already diarized — a different pipeline, not
     # just a different transcriber, and the only option that sends audio off
     # the machine. See docs/setup-soniox.md.
-    stt_backend: str = "mlx"
+    stt_backend: str = field(default_factory=default_stt_backend)
     stt_model: str | None = None
     # Soniox region: us, eu or jp. eu and jp need activation by Soniox before
     # they will answer, so the default stays us.
@@ -67,7 +116,13 @@ class Config:
     # it mapped to null (transcribe only). They stay transcribe-only, because a
     # folder someone chose precisely so that its transcripts would not be sent
     # to a summarizer must not start sending them on upgrade.
+    # Both sets hold normalize_folder_name() forms; normalize a folder name the
+    # same way before comparing.
     transcript_only_folders: frozenset = frozenset()
+    # None = config.yaml has no `types:` block (0.2 behaviour: root + direct
+    # subfolders). A set (possibly empty) = the block is there: 0.1 scanned
+    # only these folders, and the upgrade must not change what is processed.
+    legacy_type_folders: frozenset | None = None
     # Default speaker count when neither the filename nor a spoken cue gives
     # one. 0 = let pyannote estimate (best for 3+ person meetings); set 2 for
     # workspaces that are mostly 1:1 conversations.
@@ -118,38 +173,104 @@ class Config:
         return self.inbox_dir / "_error"
 
 
+def _bad(msg: str) -> ConfigError:
+    return ConfigError(f"{CONFIG_NAME}: {msg}")
+
+
+def _hint(value: str, known: tuple) -> str:
+    folded = value.strip().casefold()
+    for k in known:
+        if folded == k:
+            return f" (did you mean '{k}'? values are case-sensitive)"
+    return ""
+
+
+def _validate(cfg: Config) -> None:
+    """Reject values that would only fail later, mid-recording."""
+    if not isinstance(cfg.language, str) or not cfg.language.strip():
+        raise _bad(f"language must be a short text such as 'en' or 'ko', got {cfg.language!r}")
+    if not isinstance(cfg.stt_backend, str) or cfg.stt_backend not in KNOWN_STT_BACKENDS:
+        hint = _hint(cfg.stt_backend, KNOWN_STT_BACKENDS) if isinstance(cfg.stt_backend, str) else ""
+        raise _bad(
+            f"unknown stt_backend {cfg.stt_backend!r}{hint}: expected one of "
+            f"{', '.join(KNOWN_STT_BACKENDS)}"
+        )
+    if not isinstance(cfg.summarizer, str) or cfg.summarizer not in KNOWN_SUMMARIZERS:
+        hint = _hint(cfg.summarizer, KNOWN_SUMMARIZERS) if isinstance(cfg.summarizer, str) else ""
+        raise _bad(
+            f"unknown summarizer {cfg.summarizer!r}{hint}: expected one of "
+            f"{', '.join(KNOWN_SUMMARIZERS)}"
+        )
+    spk = cfg.default_speakers
+    if isinstance(spk, bool) or not isinstance(spk, int) or spk < 0:
+        raise _bad(f"default_speakers must be a whole number >= 0, got {spk!r}")
+    t = cfg.summarizer_timeout_sec
+    if isinstance(t, bool) or not isinstance(t, (int, float)) or t <= 0:
+        raise _bad(f"summarizer_timeout_sec must be a number > 0, got {t!r}")
+
+
 def load_config(workspace: str | Path) -> Config:
-    """Load <workspace>/config.yaml over defaults. Missing file = defaults."""
+    """Load <workspace>/config.yaml over defaults. Missing file = defaults.
+
+    Raises ConfigError for a file that cannot be used (not a mapping, invalid
+    YAML, conflicting or invalid values) so a typo fails before any recording
+    is touched instead of silently falling back to cloud defaults.
+    """
     ws = Path(workspace).expanduser().resolve()
     cfg_path = ws / CONFIG_NAME
     raw: dict = {}
     if cfg_path.exists():
-        loaded = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-        if isinstance(loaded, dict):
-            raw = loaded
+        try:
+            loaded = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+        except yaml.YAMLError as exc:
+            raise _bad(f"not valid YAML: {str(exc).splitlines()[0] if str(exc) else exc}") from exc
+        if loaded is None:
+            loaded = {}
+        if not isinstance(loaded, dict):
+            raise _bad(
+                "must be a mapping of `key: value` lines, got "
+                f"{type(loaded).__name__}; see the config.yaml that `moim-scribe init` writes"
+            )
+        raw = loaded
+
+    unknown = sorted(str(k) for k in raw if k not in _KNOWN_KEYS)
+    if unknown:
+        logger.warning(
+            "config.yaml: unknown key(s) ignored: %s (typo? known keys: %s)",
+            ", ".join(unknown), ", ".join(sorted(_KNOWN_KEYS - {"types"})),
+        )
+
+    if raw.get("stt") is not None:
+        if raw.get("stt_backend") is not None and raw["stt"] != raw["stt_backend"]:
+            raise _bad(
+                f"`stt: {raw['stt']}` and `stt_backend: {raw['stt_backend']}` disagree: "
+                "they are the same setting, keep only stt_backend"
+            )
+        raw = {**raw, "stt_backend": raw["stt"]}
 
     cfg = Config(workspace=ws)
-    for key in (
-        "language",
-        "stt_backend",
-        "stt_model",
-        "soniox_region",
-        "hybrid_diarization",
-        "summarizer",
-        "summarizer_model",
-        "summarizer_timeout_sec",
-        "default_speakers",
-    ):
+    for key in _SCALAR_KEYS:
         if key in raw and raw[key] is not None:
             setattr(cfg, key, raw[key])
-    if "types" in raw:
-        # Workspaces created before 0.2 carry a `types:` map. Say it is no
-        # longer read rather than ignoring it in silence: a user who mapped a
-        # folder to "transcribe only" would otherwise start getting summaries
-        # with no hint as to why.
-        legacy = raw["types"] if isinstance(raw["types"], dict) else {}
+    if "summarizer" in raw and (raw["summarizer"] is None or raw["summarizer"] is False):
+        # YAML turns a bare `none`-ish intent into null/false; a user writing
+        # that means "no summarizer", not "the default cloud one".
+        cfg.summarizer = "none"
+        logger.info("config.yaml: summarizer is %s, treated as 'none' (transcripts only)", raw["summarizer"])
+    _validate(cfg)
+
+    if raw.get("types") is not None:
+        # Workspaces created before 0.2 carry a `types:` map. 0.1 scanned only
+        # the folders it names, so while the block is there so do we, and
+        # folders mapped to null stay transcript-only (a folder someone chose
+        # so that its transcripts are not sent to a summarizer must not start
+        # sending them on upgrade).
+        if not isinstance(raw["types"], dict):
+            raise _bad("`types:` must be a mapping of folder names (it is a leftover of 0.1)")
+        legacy = raw["types"]
+        cfg.legacy_type_folders = frozenset(normalize_folder_name(n) for n in legacy)
         cfg.transcript_only_folders = frozenset(
-            str(name) for name, lens in legacy.items() if lens is None
+            normalize_folder_name(n) for n, lens in legacy.items() if lens is None
         )
         kept = (
             f" Folders it mapped to null ({', '.join(sorted(cfg.transcript_only_folders))}) "
@@ -157,9 +278,10 @@ def load_config(workspace: str | Path) -> Config:
             if cfg.transcript_only_folders else ""
         )
         logger.warning(
-            "config.yaml: `types:` is no longer used: every recording in inbox/ "
-            "(and its subfolders) gets the same summary." + kept + " For transcripts "
-            "only everywhere, set `summarizer: none` and delete the `types:` block."
+            "config.yaml: `types:` is a 0.1 setting. While it is there only the folders "
+            "it names are scanned (as in 0.1) and every recording gets the same summary."
+            + kept + " Delete the `types:` block to use the flat inbox; for transcripts "
+            "only everywhere, set `summarizer: none`."
         )
     return cfg
 

@@ -142,3 +142,15 @@ def test_save_card_unmatched_is_noop(tmp_path):
     md.write_text("# Notes\n", encoding="utf-8")
     save_card(tmp_path, "unmatched", md)
     assert not any(p.is_dir() and (p / "_history").exists() for p in tmp_path.iterdir())
+
+
+def test_string_title_contains_is_a_one_keyword_list(tmp_path):
+    import json
+
+    from moim_scribe.packs import find_matching_pack
+
+    d = tmp_path / "standup"
+    d.mkdir()
+    (d / "match.json").write_text(json.dumps({"title_contains": "standup"}), encoding="utf-8")
+    assert find_matching_pack(tmp_path, "weekly standup") == d
+    assert find_matching_pack(tmp_path, "something else") is None

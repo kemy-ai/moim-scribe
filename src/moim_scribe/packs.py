@@ -93,6 +93,8 @@ def find_matching_pack(packs_dir: Path, title: str) -> Path | None:
         if not isinstance(spec, dict):
             continue
         keywords = spec.get("title_contains", [])
+        if isinstance(keywords, str):
+            keywords = [keywords]  # a bare string means one keyword
         if not isinstance(keywords, list):
             continue
         for kw in keywords:

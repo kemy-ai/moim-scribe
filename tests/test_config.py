@@ -1,13 +1,18 @@
 """Workspace config loading and skeleton creation."""
 import logging
 
-from moim_scribe.config import SUMMARY_LENS, ensure_workspace_dirs, load_config
+from moim_scribe.config import (
+    SUMMARY_LENS,
+    default_stt_backend,
+    ensure_workspace_dirs,
+    load_config,
+)
 
 
 def test_defaults_without_file(tmp_path):
     cfg = load_config(tmp_path)
     assert cfg.language == "ko"
-    assert cfg.stt_backend == "mlx"
+    assert cfg.stt_backend == default_stt_backend()
     assert cfg.summarizer == "claude_cli"
     assert not hasattr(cfg, "types")
     assert cfg.default_speakers == 0
