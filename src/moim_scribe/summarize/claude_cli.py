@@ -14,9 +14,10 @@ it is started with everything else switched off (ISOLATION_FLAGS):
     in an end-to-end run, an English workspace came back summarized in Korean
     because the machine's global instructions asked for Korean.
 
-Older CLI versions do not know these flags. Rather than fail every summary on
-them, one refusal that names an unknown option is retried without the flags,
-with a warning saying what was lost.
+Older CLI versions do not know these flags. That case fails closed: a clear
+error tells the user to update Claude Code or pick another summarizer. There
+is deliberately no retry without the flags, because that would hand a
+transcript to an agent with tools and the user's own settings.
 """
 from __future__ import annotations
 
@@ -45,13 +46,12 @@ class ClaudeCliSummarizer:
         base = [exe, "-p", "--model", self.model]
         r = self._run([*base, *ISOLATION_FLAGS], prompt)
         if r.returncode != 0 and "unknown option" in (r.stderr or "").lower():
-            logger.warning(
+            raise RuntimeError(
                 "this claude CLI does not accept the isolation flags "
-                f"({' '.join(ISOLATION_FLAGS)}); retrying without them. The summary "
-                "now runs with your own Claude Code settings and with tools "
-                "available. Update Claude Code to close this."
+                f"({' '.join(ISOLATION_FLAGS)}), and running without them would "
+                "give the summary step tools and your own Claude Code settings. "
+                "Update Claude Code, or set summarizer to ollama / none in config.yaml"
             )
-            r = self._run(base, prompt)
         if r.returncode != 0:
             raise RuntimeError(f"claude CLI exited {r.returncode}: {r.stderr.strip()[:500]}")
         out = r.stdout.strip()
@@ -65,6 +65,7 @@ class ClaudeCliSummarizer:
             input=prompt,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=self.timeout_sec,
             check=False,
         )

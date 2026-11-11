@@ -2,9 +2,8 @@
 
 The CLI is an agent. It is given a transcript as its prompt, so it must start
 with no tools and none of the machine's own customizations; and an older CLI
-that does not know those flags must still produce a summary.
+that does not know those flags must fail closed, never run unisolated.
 """
-import logging
 import subprocess
 
 import pytest
@@ -37,17 +36,26 @@ def test_the_cli_is_started_without_tools_or_customizations(monkeypatch):
     assert set(ISOLATION_FLAGS) == {"--safe-mode", "--strict-mcp-config", "--tools="}
 
 
-def test_an_older_cli_gets_one_retry_without_the_flags(monkeypatch, caplog):
+def test_an_older_cli_fails_closed_without_a_retry(monkeypatch):
     calls = _fake_run(monkeypatch, [
         (1, "", "error: unknown option '--safe-mode'"),
         (0, "# Summary\n", ""),
     ])
-    with caplog.at_level(logging.WARNING, logger="moim_scribe.summarize.claude_cli"):
-        out = ClaudeCliSummarizer("sonnet", executable="/bin/claude").summarize("t")
-    assert out == "# Summary"
-    assert len(calls) == 2
-    assert not any(f in calls[1] for f in ISOLATION_FLAGS)
-    assert any("tools" in r.message and "Update Claude Code" in r.message for r in caplog.records)
+    with pytest.raises(RuntimeError, match="Update Claude Code"):
+        ClaudeCliSummarizer("sonnet", executable="/bin/claude").summarize("t")
+    assert len(calls) == 1
+
+
+def test_subprocess_is_started_with_utf8_encoding(monkeypatch):
+    seen = {}
+
+    def run(argv, **kw):
+        seen.update(kw)
+        return subprocess.CompletedProcess(argv, 0, "ok", "")
+
+    monkeypatch.setattr(claude_cli.subprocess, "run", run)
+    ClaudeCliSummarizer("sonnet", executable="/bin/claude").summarize("t")
+    assert seen["encoding"] == "utf-8"
 
 
 def test_any_other_failure_is_not_retried(monkeypatch):
@@ -57,12 +65,3 @@ def test_any_other_failure_is_not_retried(monkeypatch):
     with pytest.raises(RuntimeError, match="Not logged in"):
         ClaudeCliSummarizer("sonnet", executable="/bin/claude").summarize("t")
     assert len(calls) == 1
-
-
-def test_a_failed_retry_surfaces_the_second_error(monkeypatch):
-    _fake_run(monkeypatch, [
-        (1, "", "error: unknown option '--safe-mode'"),
-        (1, "", "Not logged in"),
-    ])
-    with pytest.raises(RuntimeError, match="Not logged in"):
-        ClaudeCliSummarizer("sonnet", executable="/bin/claude").summarize("t")

@@ -24,6 +24,7 @@ from collections import Counter
 from pathlib import Path
 
 from .lang import detect_num_speakers
+from .secrets import read_secret_file
 from .speakers.db import SpeakerDB
 from .stt import Segment, STTBackend
 
@@ -170,10 +171,7 @@ def find_hf_token(data_dir: Path, arg_token: str | None = None) -> str | None:
         return arg_token
     if os.environ.get("HF_TOKEN"):
         return os.environ["HF_TOKEN"]
-    p = data_dir / ".hf_token"
-    if p.exists():
-        return p.read_text().strip() or None
-    return None
+    return read_secret_file(data_dir / ".hf_token")
 
 
 def get_hf_token(data_dir: Path, arg_token: str | None = None) -> str:
@@ -183,7 +181,7 @@ def get_hf_token(data_dir: Path, arg_token: str | None = None) -> str:
         return token
     raise SystemExit(
         "No Hugging Face token found. Set HF_TOKEN, create "
-        f"{data_dir / '.hf_token'}, or pass --token. See docs/setup-pyannote.md"
+        f"{data_dir / '.hf_token'}. See docs/setup-pyannote.md"
     )
 
 
@@ -1115,7 +1113,7 @@ def run_diarization(
         logger.info(f"  head transcription for spoken cue took {time.time() - th:.0f}s")
         if detected:
             num_spk = detected
-            logger.info(f"speaker count: {num_spk} (spoken cue — override with --speakers if wrong)")
+            logger.info(f"speaker count: {num_spk} (spoken cue — override with default_speakers in config.yaml if wrong)")
         else:
             num_spk = default_speakers or None
             logger.info(

@@ -18,7 +18,11 @@ class OllamaSummarizer:
     def __init__(self, model: str, timeout_sec: int = 900, host: str | None = None):
         self.model = model
         self.timeout_sec = timeout_sec
-        self.host = (host or os.environ.get("OLLAMA_HOST") or DEFAULT_HOST).rstrip("/")
+        raw = (host or os.environ.get("OLLAMA_HOST") or DEFAULT_HOST).strip()
+        # Ollama's own documented form has no scheme (`0.0.0.0`, `host:11434`).
+        if "://" not in raw:
+            raw = f"http://{raw}"
+        self.host = raw.rstrip("/")
 
     def summarize(self, prompt: str) -> str:
         body = json.dumps(
