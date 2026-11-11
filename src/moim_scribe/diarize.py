@@ -208,16 +208,37 @@ def concat_audio(session: str) -> str:
     return out
 
 
+def _remove_quietly(*paths: str) -> None:
+    for f in paths:
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+
+
 def prepare_audio(inp: str, workdir: str) -> str:
-    """Single audio file -> 16k mono wav; directory -> chunk concat."""
+    """Single audio file -> 16k mono wav; directory -> chunk concat.
+
+    A failed ffmpeg run can leave a partial wav behind; it is removed here,
+    since the caller never learns its name.
+    """
     if os.path.isfile(inp):
         out = os.path.join(workdir, f"_diarize_full_{PID}.wav")
-        subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-i", inp, "-ar", "16000", "-ac", "1", out],
-            check=True,
-        )
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", "-i", inp, "-ar", "16000", "-ac", "1", out],
+                check=True,
+            )
+        except BaseException:
+            _remove_quietly(out)
+            raise
         return out
-    return concat_audio(inp)
+    try:
+        return concat_audio(inp)
+    except BaseException:
+        _remove_quietly(os.path.join(inp, f"_diarize_full_{PID}.wav"),
+                        os.path.join(inp, f"_concat_list_{PID}.txt"))
+        raise
 
 
 def load_initial_prompt(glossary_path: Path) -> str | None:
@@ -1087,92 +1108,91 @@ def run_diarization(
     audio = prepare_audio(input_path, session)
     logger.info(f"  audio ready in {time.time() - t0:.0f}s")
 
-    initial_prompt = load_initial_prompt(glossary_path) if glossary_path else None
-    if initial_prompt:
-        logger.info(f"glossary prompt active ({len(initial_prompt)} chars)")
-
-    if num_speakers is not None:
-        num_spk = num_speakers or None  # 0 -> None (pyannote auto)
-        logger.info(f"speaker count: {num_spk or 'auto'} (explicit)")
-    else:
-        th = time.time()
-        head_wav = os.path.join(session, f"_diarize_head_{PID}.wav")
-        try:
-            subprocess.run(
-                ["ffmpeg", "-y", "-loglevel", "error", "-i", audio,
-                 "-t", str(HEAD_WINDOW_SEC), "-c", "copy", head_wav],
-                check=True,
-            )
-            head_segs = transcribe_segments(stt_backend, head_wav, language, initial_prompt)
-        finally:
-            try:
-                os.remove(head_wav)
-            except OSError:
-                pass
-        detected = detect_num_speakers(language, head_segs, window_sec=HEAD_WINDOW_SEC)
-        logger.info(f"  head transcription for spoken cue took {time.time() - th:.0f}s")
-        if detected:
-            num_spk = detected
-            logger.info(f"speaker count: {num_spk} (spoken cue — override with default_speakers in config.yaml if wrong)")
-        else:
-            num_spk = default_speakers or None
-            logger.info(
-                f"no spoken cue -> {'default ' + str(num_spk) if num_spk else 'pyannote auto-estimate'}"
-                " (saying the attendee count at the start of the recording is more reliable)"
-            )
-
-    # whisper and pyannote are independent until the merge step — run them in
-    # parallel. They share the GPU, so each is slower than solo, but the total
-    # beats sequential.
-    t1 = time.time()
-    logger.info(f"transcription ∥ diarization starting (speakers={num_spk or 'auto'})")
-    from concurrent.futures import ThreadPoolExecutor
-
-    def _timed_diarize():
-        td = time.time()
-        r = diarize_turns(audio, hf_token, num_speakers=num_spk)
-        logger.info(f"  pyannote took {time.time() - td:.0f}s (inside parallel window)")
-        return r
-
-    ex = ThreadPoolExecutor(max_workers=1)
-    fut = ex.submit(_timed_diarize)
+    # The working wav is a full decoded copy of the recording: it must not
+    # outlive this call whether the run succeeds or raises.
     try:
-        segs = transcribe_segments(stt_backend, audio, language, initial_prompt)
-        logger.info(f"  whisper: {len(segs)} segments ({time.time() - t1:.0f}s)")
-        turns = fut.result()
-    except Exception:
-        # If whisper fails, don't wait for pyannote — propagate fast so the
-        # caller can quarantine the file.
-        ex.shutdown(wait=False, cancel_futures=True)
-        raise
-    ex.shutdown(wait=True)
-    n_clusters = len({s for *_, s in turns})
-    logger.info(f"  pyannote: {n_clusters} speaker clusters ({time.time() - t1:.0f}s parallel window)")
+        initial_prompt = load_initial_prompt(glossary_path) if glossary_path else None
+        if initial_prompt:
+            logger.info(f"glossary prompt active ({len(initial_prompt)} chars)")
 
-    merged = []
-    for st, en, txt in segs:
-        spk = speaker_at(turns, (st + en) / 2)
-        merged.append({"start": round(st, 1), "end": round(en, 1), "speaker": spk, "text": txt})
-    # Snapshot raw cluster labels (index-aligned with merged) BEFORE renaming,
-    # so merge detection still knows each segment's original cluster.
-    raw_labels = [m["speaker"] for m in merged]
-
-    merged, id_mapping, id_sims, merge_info = identify_and_repair(
-        audio, merged, raw_labels, speaker_db, model_dir, identify
-    )
-
-    out_jsonl, out_txt, out_speakers, speakers_json = write_outputs(
-        session, prefix, merged, id_mapping, id_sims, merge_info,
-        mixed_info=merge_info.get("mixed_check"),
-    )
-    logger.info(f"done -> {out_txt} ({time.time() - t0:.0f}s total)")
-
-    if not keep_audio:
-        for f in (audio, os.path.join(session, f"_concat_list_{PID}.txt")):
+        if num_speakers is not None:
+            num_spk = num_speakers or None  # 0 -> None (pyannote auto)
+            logger.info(f"speaker count: {num_spk or 'auto'} (explicit)")
+        else:
+            th = time.time()
+            head_wav = os.path.join(session, f"_diarize_head_{PID}.wav")
             try:
-                os.remove(f)
-            except OSError:
-                pass
+                subprocess.run(
+                    ["ffmpeg", "-y", "-loglevel", "error", "-i", audio,
+                     "-t", str(HEAD_WINDOW_SEC), "-c", "copy", head_wav],
+                    check=True,
+                )
+                head_segs = transcribe_segments(stt_backend, head_wav, language, initial_prompt)
+            finally:
+                try:
+                    os.remove(head_wav)
+                except OSError:
+                    pass
+            detected = detect_num_speakers(language, head_segs, window_sec=HEAD_WINDOW_SEC)
+            logger.info(f"  head transcription for spoken cue took {time.time() - th:.0f}s")
+            if detected:
+                num_spk = detected
+                logger.info(f"speaker count: {num_spk} (spoken cue — override with default_speakers in config.yaml if wrong)")
+            else:
+                num_spk = default_speakers or None
+                logger.info(
+                    f"no spoken cue -> {'default ' + str(num_spk) if num_spk else 'pyannote auto-estimate'}"
+                    " (saying the attendee count at the start of the recording is more reliable)"
+                )
+
+        # whisper and pyannote are independent until the merge step — run them in
+        # parallel. They share the GPU, so each is slower than solo, but the total
+        # beats sequential.
+        t1 = time.time()
+        logger.info(f"transcription ∥ diarization starting (speakers={num_spk or 'auto'})")
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _timed_diarize():
+            td = time.time()
+            r = diarize_turns(audio, hf_token, num_speakers=num_spk)
+            logger.info(f"  pyannote took {time.time() - td:.0f}s (inside parallel window)")
+            return r
+
+        ex = ThreadPoolExecutor(max_workers=1)
+        fut = ex.submit(_timed_diarize)
+        try:
+            segs = transcribe_segments(stt_backend, audio, language, initial_prompt)
+            logger.info(f"  whisper: {len(segs)} segments ({time.time() - t1:.0f}s)")
+            turns = fut.result()
+        except Exception:
+            # If whisper fails, don't wait for pyannote — propagate fast so the
+            # caller can quarantine the file.
+            ex.shutdown(wait=False, cancel_futures=True)
+            raise
+        ex.shutdown(wait=True)
+        n_clusters = len({s for *_, s in turns})
+        logger.info(f"  pyannote: {n_clusters} speaker clusters ({time.time() - t1:.0f}s parallel window)")
+
+        merged = []
+        for st, en, txt in segs:
+            spk = speaker_at(turns, (st + en) / 2)
+            merged.append({"start": round(st, 1), "end": round(en, 1), "speaker": spk, "text": txt})
+        # Snapshot raw cluster labels (index-aligned with merged) BEFORE renaming,
+        # so merge detection still knows each segment's original cluster.
+        raw_labels = [m["speaker"] for m in merged]
+
+        merged, id_mapping, id_sims, merge_info = identify_and_repair(
+            audio, merged, raw_labels, speaker_db, model_dir, identify
+        )
+
+        out_jsonl, out_txt, out_speakers, speakers_json = write_outputs(
+            session, prefix, merged, id_mapping, id_sims, merge_info,
+            mixed_info=merge_info.get("mixed_check"),
+        )
+        logger.info(f"done -> {out_txt} ({time.time() - t0:.0f}s total)")
+    finally:
+        if not keep_audio:
+            _remove_quietly(audio, os.path.join(session, f"_concat_list_{PID}.txt"))
 
     speakers_json["txt_path"] = out_txt
     speakers_json["jsonl_path"] = out_jsonl
