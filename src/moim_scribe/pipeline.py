@@ -12,6 +12,7 @@ Reliability rules inherited from the original production pipeline:
 """
 from __future__ import annotations
 
+import errno
 import importlib.resources
 import logging
 import os
@@ -25,6 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .config import AUDIO_EXTS, SUMMARY_LENS, Config
+from .diarize import PID as ENGINE_PID
 from .diarize import get_hf_token, run_diarization
 from .packs import build_block, save_card
 from .speaker_stats import render_speaker_stats_block
@@ -69,8 +71,20 @@ PROMPT_HEADERS = {
 }
 
 _HEADING_MARKER = re.compile(r"#{1,6}\s")
-_KO_FILENAME_COUNT = re.compile(r"([0-9]+)\s*[명인]")
-_EN_FILENAME_COUNT = re.compile(r"\b([0-9]+)\s*(?:p|ppl|people|speakers?)\b", re.IGNORECASE)
+# A count is one or two digits that do not continue a longer number, so
+# "2025 ..." and "1103 ..." never read as a count of 25 or 3.
+#   명 counts people in any position ("5명", "5명 회의"), but not as the first
+#     syllable of a word ("2025 명절").
+#   인 is also a prefix that builds nouns ("3인칭", "1인 가구", "1인 기업"), so
+#     it counts only where no Hangul word follows it, after optional spaces:
+#     "회의 3인" and "전략회의 3인 final" do, "1인 가구 인터뷰" does not.
+_KO_FILENAME_COUNT = re.compile(
+    r"(?<![0-9])([0-9]{1,2})\s*(?:명(?![가-힣])|인(?!\s*[가-힣]))"
+)
+_EN_FILENAME_COUNT = re.compile(
+    r"(?<![0-9])\b([0-9]{1,2})\s*(?:p|ppl|people|speakers?)\b", re.IGNORECASE
+)
+FILENAME_COUNT_RANGE = (1, 30)
 
 
 def filename_speaker_hint(title: str, language: str) -> tuple[int | None, str]:
@@ -79,15 +93,22 @@ def filename_speaker_hint(title: str, language: str) -> tuple[int | None, str]:
     Naming the count in the filename ("book club 5명", "standup 4p") is the
     most reliable source — set at save time, never misheard. Filenames from
     phones are frequently NFD, so normalize first.
+
+    The count is forced on the speaker separation, so a false hit is worse
+    than none: "1103 인터뷰" used to become 1103 speakers and the title "터뷰".
+    Only a count of 1 to 30 is taken, and when nothing qualifies the title is
+    returned untouched.
     """
     t = unicodedata.normalize("NFC", title)
     pattern = _KO_FILENAME_COUNT if language == "ko" else _EN_FILENAME_COUNT
-    m = pattern.search(t)
-    if not m:
-        return None, t
-    count = int(m.group(1))
-    cleaned = re.sub(r"\s+", " ", pattern.sub("", t)).strip()
-    return count, (cleaned or "untitled")
+    lo, hi = FILENAME_COUNT_RANGE
+    for m in pattern.finditer(t):
+        count = int(m.group(1))
+        if not lo <= count <= hi:
+            continue
+        cleaned = re.sub(r"\s+", " ", t[: m.start()] + " " + t[m.end():]).strip()
+        return count, (cleaned or "untitled")
+    return None, t
 
 
 def _headers(language: str) -> dict:
@@ -321,8 +342,17 @@ def is_stable_audio(path: Path) -> bool:
         s2 = path.stat().st_size
     except OSError:
         return False
-    if s1 != s2 or s1 < MIN_FILE_BYTES:
-        logger.info(f"SKIP still syncing/too small: {path.name} ({s1} -> {s2})")
+    if s1 != s2:
+        logger.info(f"SKIP still being written (size {s1} -> {s2} bytes): {path.name}")
+        return False
+    if s1 < MIN_FILE_BYTES:
+        # Stable and tiny: a cloud placeholder reports its final size from the
+        # start, so this is not a download in progress. It is skipped on every
+        # pass, so say plainly what it is and what to do.
+        logger.warning(
+            f"SKIP {path.name}: {s1} bytes is too small to be a recording "
+            f"(minimum {MIN_FILE_BYTES}): remove it from inbox/"
+        )
         return False
     ratio = on_disk_ratio(path)
     if ratio is not None and ratio < MIN_ON_DISK_RATIO:
@@ -340,7 +370,8 @@ def is_stable_audio(path: Path) -> bool:
         else:
             logger.warning(
                 f"SKIP only {ratio:.0%} of the file is on disk and it could not be "
-                f"read in full (cloud download in progress?): {path.name}"
+                f"read in full: {path.name}: still downloading, or not readable: "
+                "if it is not downloading, remove it from inbox/"
             )
             return False
     probe = subprocess.run(
@@ -348,12 +379,101 @@ def is_stable_audio(path: Path) -> bool:
         capture_output=True, timeout=60, check=False,
     )
     if probe.returncode != 0:
-        logger.info(f"SKIP not decodable yet (cloud download in progress?): {path.name}")
+        # No state is kept between passes, so this cannot tell a download that
+        # will finish from a file that will never decode. Name both, at a level
+        # that shows: a file that is not audio is skipped on every pass.
+        logger.warning(
+            f"SKIP cannot decode {path.name}: still downloading, or not a valid "
+            "audio file: if it is not downloading, remove it from inbox/"
+        )
         return False
     return True
 
 
 ARCHIVE_SIDECARS = ("_transcript_diarized.txt", "_speakers.json")
+
+# Work products the engine writes next to the claimed file, by suffix.
+WORK_SUFFIXES = (
+    "_transcript_diarized.jsonl",
+    "_transcript_diarized.txt",
+    "_speakers.json",
+)
+# The longest name the pipeline may build from a recording's stem: a work
+# product, or an archived sidecar after archive_stem() added " (n)". Result
+# names in results/ ("YYMMDD_" + title + " (n)" + "_diarized.jsonl") are
+# shorter, and the title is never longer than the stem.
+LONGEST_STEM_SUFFIX = " (99)_transcript_diarized.jsonl"
+
+# Temporary files the engine (diarize.py) creates in the claimed file's folder,
+# named after the engine process id. The full-length wav is as large as the
+# recording decoded, and it is removed only when the engine finishes.
+_ENGINE_TEMP_NAME = re.compile(r"_(?:diarize_full|diarize_head|concat_list)_(\d+)\.(?:wav|txt)")
+
+
+def _exists(path: Path) -> bool:
+    """Path.exists() that answers False instead of raising.
+
+    A name the filesystem cannot hold (ENAMETOOLONG) raises on Python 3.11
+    rather than returning False, and such a file cannot exist anyway.
+    """
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
+def _safe_unlink(path: Path) -> None:
+    """Delete a file if it is there; log and carry on when that fails.
+
+    Cleanup must never be what stops a pass: an unlink that raised on an
+    over-long name used to escape scan_inbox on every pass, forever.
+    """
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as e:
+        logger.warning(f"could not remove {path.name}: {type(e).__name__}: {e}")
+
+
+def _safe_move(src: Path, dest: Path) -> bool:
+    """Move a file; log and return False instead of raising when it fails."""
+    try:
+        shutil.move(str(src), dest)
+        return True
+    except OSError as e:
+        logger.error(f"could not move {src.name} to {dest.parent}: {type(e).__name__}: {e}")
+        return False
+
+
+def remove_engine_temp_files(folder: Path, pid: int) -> None:
+    """Remove the temporary files an engine run with this pid left in folder.
+
+    diarize.py deletes its full-length wav only on success, so a failed run
+    leaves a copy of the whole recording, decoded, in _processing.
+    """
+    for name in (f"_diarize_full_{pid}.wav", f"_diarize_head_{pid}.wav", f"_concat_list_{pid}.txt"):
+        _safe_unlink(folder / name)
+
+
+def name_fits(folder: Path, stem: str) -> bool:
+    """Whether every name the pipeline builds from this stem can exist in folder.
+
+    Decided by creating the longest such name, because the limit is the
+    filesystem's and is not a byte count everywhere: APFS allows 255 UTF-16
+    units (255 NFC Hangul syllables, 765 bytes, are fine; an NFD syllable takes
+    2 or 3 of them), while ext4 allows 255 bytes. Only "name too long" answers
+    no; any other error lets the run go ahead, since its cleanup is now safe.
+    """
+    probe = folder / f"{stem}{LONGEST_STEM_SUFFIX}"
+    try:
+        fd = os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return True
+    except OSError as e:
+        # ERROR_FILENAME_EXCED_RANGE (206) is how Windows says the same thing.
+        return not (e.errno == errno.ENAMETOOLONG or getattr(e, "winerror", None) == 206)
+    os.close(fd)
+    _safe_unlink(probe)
+    return True
 
 
 def archive_stem(dest_dir: Path, stem: str, suffix: str) -> str:
@@ -367,8 +487,8 @@ def archive_stem(dest_dir: Path, stem: str, suffix: str) -> str:
     they still pair up.
     """
     def taken(s: str) -> bool:
-        return (dest_dir / f"{s}{suffix}").exists() or any(
-            (dest_dir / f"{s}{side}").exists() for side in ARCHIVE_SIDECARS
+        return _exists(dest_dir / f"{s}{suffix}") or any(
+            _exists(dest_dir / f"{s}{side}") for side in ARCHIVE_SIDECARS
         )
 
     candidate, n = stem, 2
@@ -378,25 +498,56 @@ def archive_stem(dest_dir: Path, stem: str, suffix: str) -> str:
     return candidate
 
 
+def _is_stale_engine_temp(name: str) -> bool | None:
+    """None when name is not an engine temp file; else whether its run is over."""
+    m = _ENGINE_TEMP_NAME.fullmatch(name)
+    if not m:
+        return None
+    pid = int(m.group(1))
+    # Our own pid cannot be mid-run here (quarantine runs before this pass
+    # starts any engine), and a container restart reuses pids.
+    return pid == os.getpid() or not PipelineLock._pid_alive(pid)
+
+
 def quarantine_leftovers(cfg: Config) -> None:
     """Move files stranded in _processing (a previous crash) to _error.
 
     Never auto-retry them: the same input crashed once already, and an
     automatic retry loop would burn the machine on a poison file.
+
+    The engine's own temp files are not recordings and never go to _error: a
+    leftover from a run that is over is deleted, one whose process is still
+    alive is left alone. Every step is OSError-safe, so one file that cannot
+    be moved or deleted is logged and the rest are still handled.
     """
-    for f in sorted(cfg.processing_dir.iterdir()) if cfg.processing_dir.exists() else []:
+    if not cfg.processing_dir.exists():
+        return
+    try:
+        entries = sorted(cfg.processing_dir.iterdir())
+    except OSError as e:
+        logger.error(f"cannot list {cfg.processing_dir}: {type(e).__name__}: {e}")
+        return
+    for f in entries:
+        stale_temp = _is_stale_engine_temp(f.name)
+        if stale_temp is not None:
+            if stale_temp:
+                _safe_unlink(f)
+                logger.info(f"removed a temp file left by an earlier run: {f.name}")
+            continue
         # Same gate as the inbox scan: a claimed file whose extension was
         # stripped would otherwise be invisible here too, and stay in
         # _processing forever with nothing logged.
         if not f.is_file() or not classify_audio(f):
             continue
         stem = f.stem
-        for junk in cfg.processing_dir.glob(f"{stem}_transcript_diarized.*"):
-            junk.unlink(missing_ok=True)
-        (cfg.processing_dir / f"{stem}_speakers.json").unlink(missing_ok=True)
+        for suffix in WORK_SUFFIXES:
+            _safe_unlink(cfg.processing_dir / f"{stem}{suffix}")
         dest = archive_stem(cfg.error_dir, stem, f.suffix)
-        shutil.move(str(f), cfg.error_dir / f"{dest}{f.suffix}")
-        logger.warning(f"stranded file quarantined to _error (previous crash): {f.name}")
+        if _safe_move(f, cfg.error_dir / f"{dest}{f.suffix}"):
+            logger.warning(
+                f"stranded file quarantined to _error (a previous run stopped while "
+                f"processing it): {f.name}: to retry, move it back to inbox/"
+            )
 
 
 def free_result_base(results_dir: Path, base: str) -> str:
@@ -568,14 +719,22 @@ def process_recording(cfg: Config, claimed: Path, *, summarize: bool = True) -> 
 class PipelineLock:
     """Cross-platform single-instance lock (directory + pid file).
 
-    Stale detection: if the recorded pid is gone (or unreadable and the
-    lock is over 24h old), the lock is broken and reclaimed.
+    Stale detection: if the recorded pid is gone, or is this process's own
+    pid (a container restarts with the same pid every boot, so a lock left by
+    the previous boot names a pid that is alive: us), or the pid file is
+    unreadable and the lock is over 24h old, the lock is broken and reclaimed.
+
+    acquire() returning False means another run holds the lock, unless
+    `error` is set: then the lock could not be created at all (a read-only
+    workspace, say), which is a different problem with a different fix.
     """
 
     def __init__(self, workspace: Path):
         self.lock_dir = workspace / ".moim-scribe.lock"
+        self.error: OSError | None = None
 
-    def _pid_alive(self, pid: int) -> bool:
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
         if sys.platform == "win32":
             # os.kill(pid, 0) is NOT a liveness probe on Windows: signal 0 is
             # CTRL_C_EVENT, which gets broadcast to our own console group and
@@ -612,7 +771,7 @@ class PipelineLock:
             stale = False
             try:
                 pid = int(pid_file.read_text().strip())
-                stale = not self._pid_alive(pid)
+                stale = pid == os.getpid() or not self._pid_alive(pid)
             except (OSError, ValueError):
                 age = time.time() - self.lock_dir.stat().st_mtime
                 stale = age > 24 * 3600
@@ -621,9 +780,17 @@ class PipelineLock:
             shutil.rmtree(self.lock_dir, ignore_errors=True)
         try:
             self.lock_dir.mkdir()
-        except OSError:
+        except FileExistsError:
+            return False  # another run created it between our check and here
+        except OSError as e:
+            self.error = e
             return False
-        (self.lock_dir / "pid").write_text(str(os.getpid()))
+        try:
+            (self.lock_dir / "pid").write_text(str(os.getpid()))
+        except OSError as e:
+            self.error = e
+            shutil.rmtree(self.lock_dir, ignore_errors=True)
+            return False
         return True
 
     def release(self) -> None:
@@ -660,7 +827,13 @@ def scan_inbox(cfg: Config) -> dict:
     """
     lock = PipelineLock(cfg.workspace)
     if not lock.acquire():
-        logger.info("another run is active — yielding this pass")
+        if lock.error is not None:
+            logger.error(
+                f"cannot create the lock {lock.lock_dir}: {type(lock.error).__name__}: "
+                f"{lock.error}: the workspace must be writable; nothing was processed"
+            )
+        else:
+            logger.info("another run is active: yielding this pass")
         return {"processed": 0, "failed": 0, "skipped": 0}
     try:
         quarantine_leftovers(cfg)
@@ -669,10 +842,26 @@ def scan_inbox(cfg: Config) -> dict:
             for f in sorted(folder.iterdir()):
                 if not f.is_file() or f.name.startswith(".") or not classify_audio(f):
                     continue
+                if _ENGINE_TEMP_NAME.fullmatch(f.name):
+                    # The engine writes a file of exactly this name next to the
+                    # recording it works on, and cleanup deletes it.
+                    logger.warning(
+                        f"SKIP {f.name}: this name is reserved for temporary files: rename it"
+                    )
+                    counts["skipped"] += 1
+                    continue
                 if not is_stable_audio(f):
                     counts["skipped"] += 1
                     continue
                 claimed = cfg.processing_dir / f.name
+                if _exists(claimed):
+                    # A move onto it would replace that file. It is there only
+                    # if quarantine could not move it out; never overwrite it.
+                    logger.warning(
+                        f"SKIP {f.name}: a file of the same name is still in _processing"
+                    )
+                    counts["skipped"] += 1
+                    continue
                 try:
                     shutil.move(str(f), claimed)
                 except OSError:
@@ -681,11 +870,18 @@ def scan_inbox(cfg: Config) -> dict:
                     continue
 
                 stem = claimed.stem
-                work_products = [
-                    cfg.processing_dir / f"{stem}_transcript_diarized.jsonl",
-                    cfg.processing_dir / f"{stem}_transcript_diarized.txt",
-                    cfg.processing_dir / f"{stem}_speakers.json",
-                ]
+                if not name_fits(cfg.processing_dir, stem):
+                    # Starting would fail on the first work product, and before
+                    # cleanup was OSError-safe that failure stopped every pass.
+                    logger.error(
+                        f"filename too long: shorten it and move it back to inbox/: {claimed.name}"
+                    )
+                    dest = archive_stem(cfg.error_dir, stem, claimed.suffix)
+                    _safe_move(claimed, cfg.error_dir / f"{dest}{claimed.suffix}")
+                    counts["failed"] += 1
+                    continue
+
+                work_products = [cfg.processing_dir / f"{stem}{sfx}" for sfx in WORK_SUFFIXES]
                 try:
                     process_recording(
                         cfg, claimed,
@@ -694,13 +890,17 @@ def scan_inbox(cfg: Config) -> dict:
                     )
                 except Exception as e:  # noqa: BLE001 — one bad file must not stop the pass
                     logger.error(f"FAILED -> _error: {claimed.name} — {e}")
+                    # Every step below is OSError-safe: a cleanup that raises
+                    # would end this pass and, the file still being in
+                    # _processing, the quarantine of every later pass.
                     dest = archive_stem(cfg.error_dir, stem, claimed.suffix)
+                    _safe_move(claimed, cfg.error_dir / f"{dest}{claimed.suffix}")
                     for wp in work_products:
-                        if wp.name.endswith("_transcript_diarized.txt") and wp.exists():
-                            shutil.move(str(wp), cfg.error_dir / f"{dest}{wp.name[len(stem):]}")
+                        if wp.name.endswith("_transcript_diarized.txt") and _exists(wp):
+                            _safe_move(wp, cfg.error_dir / f"{dest}{wp.name[len(stem):]}")
                         else:
-                            wp.unlink(missing_ok=True)
-                    shutil.move(str(claimed), cfg.error_dir / f"{dest}{claimed.suffix}")
+                            _safe_unlink(wp)
+                    remove_engine_temp_files(cfg.processing_dir, ENGINE_PID)
                     counts["failed"] += 1
                     continue
 
