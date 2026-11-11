@@ -1,5 +1,7 @@
 """Workspace config loading and skeleton creation."""
-from moim_scribe.config import DEFAULT_TYPES, ensure_workspace_dirs, load_config
+import logging
+
+from moim_scribe.config import SUMMARY_LENS, ensure_workspace_dirs, load_config
 
 
 def test_defaults_without_file(tmp_path):
@@ -7,7 +9,7 @@ def test_defaults_without_file(tmp_path):
     assert cfg.language == "ko"
     assert cfg.stt_backend == "mlx"
     assert cfg.summarizer == "claude_cli"
-    assert cfg.types == DEFAULT_TYPES
+    assert not hasattr(cfg, "types")
     assert cfg.default_speakers == 0
     assert cfg.speakers_dir == tmp_path / "speakers"
 
@@ -15,7 +17,7 @@ def test_defaults_without_file(tmp_path):
 def test_yaml_overrides(tmp_path):
     (tmp_path / "config.yaml").write_text(
         "language: en\nstt_backend: faster\nsummarizer: none\n"
-        "default_speakers: 2\ntypes:\n  standup: meeting\n  raw: null\n",
+        "default_speakers: 2\n",
         encoding="utf-8",
     )
     cfg = load_config(tmp_path)
@@ -23,7 +25,30 @@ def test_yaml_overrides(tmp_path):
     assert cfg.stt_backend == "faster"
     assert cfg.summarizer == "none"
     assert cfg.default_speakers == 2
-    assert cfg.types == {"standup": "meeting", "raw": None}
+
+
+def test_a_leftover_types_block_is_reported_not_silently_dropped(tmp_path, caplog):
+    """Pre-0.2 workspaces all carry `types:`. Someone who had mapped a folder to
+    transcribe-only would start getting summaries; the log has to say why."""
+    (tmp_path / "config.yaml").write_text(
+        "language: en\ntypes:\n  standup: meeting\n  raw: null\n", encoding="utf-8",
+    )
+    with caplog.at_level(logging.WARNING, logger="moim_scribe.config"):
+        cfg = load_config(tmp_path)
+    assert cfg.language == "en"          # the rest of the file still loads
+    assert not hasattr(cfg, "types")
+    assert any("types" in r.message and "summarizer: none" in r.message for r in caplog.records)
+
+
+def test_no_warning_without_a_types_block(tmp_path, caplog):
+    (tmp_path / "config.yaml").write_text("language: en\n", encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="moim_scribe.config"):
+        load_config(tmp_path)
+    assert not caplog.records
+
+
+def test_there_is_one_summary_lens():
+    assert SUMMARY_LENS == "summary"
 
 
 def test_soniox_settings_default_to_local_and_us(tmp_path):
@@ -58,9 +83,7 @@ def test_ensure_workspace_dirs(tmp_path):
     cfg = load_config(tmp_path)
     ensure_workspace_dirs(cfg)
     for d in (
-        cfg.inbox_dir / "meeting",
-        cfg.inbox_dir / "gathering",
-        cfg.inbox_dir / "transcript",
+        cfg.inbox_dir,
         cfg.processing_dir,
         cfg.done_dir,
         cfg.error_dir,
@@ -69,3 +92,5 @@ def test_ensure_workspace_dirs(tmp_path):
         cfg.speakers_dir,
     ):
         assert d.is_dir()
+    # Nothing but the pipeline's own folders: no type folders to choose between.
+    assert {p.name for p in cfg.inbox_dir.iterdir()} == {"_processing", "_done", "_error"}

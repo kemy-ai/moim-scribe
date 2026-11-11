@@ -10,7 +10,7 @@ import pytest
 import yaml
 
 from moim_scribe import cli
-from moim_scribe.config import load_config
+from moim_scribe.config import SUMMARY_LENS, load_config
 
 
 def _init(ws, **kw):
@@ -89,22 +89,40 @@ def test_init_refuses_to_overwrite_config_without_force(tmp_path):
     assert load_config(tmp_path).language == "xx"
 
 
-def test_init_creates_the_type_folders_from_the_template(tmp_path):
+def test_init_creates_one_flat_inbox(tmp_path):
+    """No type folders: a recording goes into inbox/ and that is the whole
+    decision. Only the pipeline's own underscore folders live there."""
     _init(tmp_path)
     cfg = load_config(tmp_path)
-    for name in ("meeting", "gathering", "transcript"):
-        assert (cfg.inbox_dir / name).is_dir()
-    # conversation ships as a lens and an example pack but is off by default,
-    # so its folder must not exist until the user enables the type.
-    assert not (cfg.inbox_dir / "conversation").exists()
+    assert {p.name for p in cfg.inbox_dir.iterdir()} == {"_processing", "_done", "_error"}
 
 
-def test_init_copies_lenses_where_the_loader_looks(tmp_path):
+def test_init_writes_a_config_without_a_types_block(tmp_path):
+    _init(tmp_path)
+    raw = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert "types" not in raw
+
+
+def test_init_copies_the_summary_lens_where_the_loader_looks(tmp_path):
+    """🔴 init and _load_lens have to agree on the folder and the file name, or
+    the very first recording fails with FileNotFoundError."""
+    from moim_scribe.pipeline import _load_common_lens, _load_lens
+
+    for lang in ("ko", "en"):
+        ws = tmp_path / lang
+        _init(ws, language=lang)
+        cfg = load_config(ws)
+        lenses = {p.name for p in (cfg.packs_dir / "lenses").iterdir()}
+        assert lenses == {"summary.ko.md", "summary.en.md", "_common.ko.md", "_common.en.md"}
+        assert _load_lens(cfg, SUMMARY_LENS).startswith("#")
+        assert _load_common_lens(cfg)
+        assert not (cfg.packs_dir / "styles").exists()
+
+
+def test_init_copies_the_example_pack(tmp_path):
     _init(tmp_path)
     cfg = load_config(tmp_path)
-    lenses = {p.name for p in (cfg.packs_dir / "lenses").iterdir()}
-    assert "conversation.ko.md" in lenses
-    assert "conversation.en.md" in lenses
+    assert (cfg.packs_dir / "bookclub-demo" / "match.json").is_file()
 
 
 @pytest.mark.parametrize("backend", ["mlx", "faster"])

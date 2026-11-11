@@ -89,7 +89,13 @@ phone-to-desktop bridge (record on the phone, it appears in the inbox).
 Two things the pipeline already handles, so you don't have to:
 
 - files that exist but are still downloading are skipped until the size is
-  stable AND the file actually decodes
+  stable AND the file actually decodes AND, on macOS, at least 95% of it is
+  physically on disk. The third check is the one that catches a partial
+  download: a file still being fetched reports its final size from the start
+  and its first 0.1s decodes, so a recording that was two-thirds downloaded
+  passed the first two and was transcribed as if it were whole. On Linux and
+  Windows that check is not applied (allocated blocks mean something else on
+  compressing filesystems, and Windows does not report them)
 - a file is claimed by an atomic move before processing, so a sync client
   re-uploading results can't cause double processing
 

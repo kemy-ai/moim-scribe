@@ -93,14 +93,14 @@ def test_scan_picks_up_an_extensionless_recording(tmp_path, monkeypatch):
     """End to end: the 4-hour silence, reproduced and then not silent."""
     cfg = load_config(tmp_path)
     ensure_workspace_dirs(cfg)
-    (cfg.inbox_dir / "meeting" / "phone call").write_bytes(b"x" * 20000)
+    (cfg.inbox_dir / "phone call").write_bytes(b"x" * 20000)
 
     _probe(monkeypatch, returncode=0, stdout="audio\n")
     monkeypatch.setattr("moim_scribe.pipeline.is_stable_audio", lambda p: True)
     seen = []
     monkeypatch.setattr(
         "moim_scribe.pipeline.process_recording",
-        lambda cfg_, claimed, type_folder: seen.append(claimed.name) or claimed,
+        lambda cfg_, claimed: seen.append(claimed.name) or claimed,
     )
 
     counts = scan_inbox(cfg)
@@ -111,7 +111,7 @@ def test_scan_picks_up_an_extensionless_recording(tmp_path, monkeypatch):
 def test_scan_ignores_a_stray_text_file(tmp_path, monkeypatch):
     cfg = load_config(tmp_path)
     ensure_workspace_dirs(cfg)
-    (cfg.inbox_dir / "meeting" / "shopping list.txt").write_text("milk", encoding="utf-8")
+    (cfg.inbox_dir / "shopping list.txt").write_text("milk", encoding="utf-8")
 
     _probe(monkeypatch, returncode=1, stdout="")
     monkeypatch.setattr("moim_scribe.pipeline.is_stable_audio", lambda p: True)

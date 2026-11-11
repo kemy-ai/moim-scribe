@@ -9,8 +9,8 @@ Do not use it to record people covertly, to identify speakers who have not
 agreed to voice enrollment, to process recordings you were not a party to,
 or to analyse conversations with a partner or family member without their
 knowledge — a private relationship is where covert recording is most
-tempting and least defensible, which is why the `conversation` example
-opens with that warning rather than burying it. Beyond being a violation
+tempting and least defensible, which is why the README opens with that
+warning rather than burying it. Beyond being a violation
 of this project's intent, covert recording and non-consensual biometric
 identification are criminal or actionable offenses in many jurisdictions.
 

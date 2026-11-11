@@ -11,6 +11,7 @@ import unicodedata
 from pathlib import Path
 
 import moim_scribe
+from moim_scribe.config import SUMMARY_LENS
 
 TEMPLATES = Path(moim_scribe.__file__).parent / "templates"
 LENSES = TEMPLATES / "lenses"
@@ -82,22 +83,53 @@ def test_every_lens_ships_in_both_languages():
             assert (LENSES / f"{stem}.{lang}.md").is_file(), f"{stem} missing .{lang}"
 
 
-def test_gathering_lens_offers_both_shapes_in_both_languages():
-    """The open-ended shape matters: a catch-up gathering read as minutes loses the point."""
-    ko = (LENSES / "gathering.ko.md").read_text(encoding="utf-8")
-    en = (LENSES / "gathering.en.md").read_text(encoding="utf-8")
-    assert "구조 A" in ko and "구조 B" in ko
-    assert "Structure A" in en and "Structure B" in en
+def test_exactly_one_summary_lens_ships():
+    """One lens for every recording. A second deliverable lens appearing here
+    means type selection is creeping back in without anything to select it."""
+    stems = {p.name.rsplit(".", 2)[0] for p in LENSES.glob("*.md")}
+    assert stems == {"_common", SUMMARY_LENS}
+    assert not (TEMPLATES / "styles").exists()
+
+
+def test_summary_lens_does_not_ask_for_a_classification():
+    """The lens has to cope with a meeting and a catch-up alike, by dropping
+    sections that have nothing in them, not by picking a shape first."""
+    ko = (LENSES / f"{SUMMARY_LENS}.ko.md").read_text(encoding="utf-8")
+    en = (LENSES / f"{SUMMARY_LENS}.en.md").read_text(encoding="utf-8")
+    assert "분류하지 않는다" in ko and "생략" in ko
+    assert "Do not classify" in en and "Leave out" in en
     assert "분량은 녹음 길이에 비례한다" in ko
     assert "Length scales with the recording" in en
 
 
-def test_per_person_shapes_forbid_guessed_attribution():
-    """Card-per-person formats force a who-said-this call — the risky part."""
-    ko = (LENSES / "gathering.ko.md").read_text(encoding="utf-8")
-    en = (LENSES / "gathering.en.md").read_text(encoding="utf-8")
-    assert "SPEAKER_NN" in ko and "추측으로 넣지 않는다" in ko
-    assert "SPEAKER_NN" in en and "by guessing" in en
+def test_summary_lens_forbids_guessed_attribution():
+    ko = (LENSES / f"{SUMMARY_LENS}.ko.md").read_text(encoding="utf-8")
+    en = (LENSES / f"{SUMMARY_LENS}.en.md").read_text(encoding="utf-8")
+    assert "SPEAKER_NN" in ko and "추측해 옮기지 않는다" in ko
+    assert "SPEAKER_NN" in en and "by guesswork" in en
+
+
+def test_round_card_headers_exist_letter_for_letter_in_the_lens():
+    """🔴 Round cards are harvested by header. If the lens renames a section and
+    packs.SECTION_HEADERS does not follow, every card silently comes out
+    header-only and the history a pack accumulates is empty."""
+    from moim_scribe.packs import SECTION_HEADERS
+
+    bodies = "\n".join(
+        (LENSES / f"{SUMMARY_LENS}.{lang}.md").read_text(encoding="utf-8") for lang in ("ko", "en")
+    )
+    lines = {ln.strip() for ln in bodies.splitlines()}
+    assert SECTION_HEADERS  # an empty list would pass the loop below vacuously
+    for header in SECTION_HEADERS:
+        assert header in lines, f"{header!r} is harvested but the lens never asks for it"
+
+
+def test_example_pack_matches_by_title_alone():
+    import json
+
+    for match in (TEMPLATES / "examples").glob("*/match.json"):
+        spec = json.loads(match.read_text(encoding="utf-8"))
+        assert set(spec) == {"title_contains"}, f"{match.parent.name}: {sorted(spec)}"
 
 
 def test_common_lens_bans_checkboxes_and_tildes_in_both_languages():

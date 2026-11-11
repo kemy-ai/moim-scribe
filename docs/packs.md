@@ -1,50 +1,63 @@
-# Packs: types, styles, and per-series context
+# Packs: optional background for a recurring group
 
-Three layers decide how a recording becomes notes:
+Packs are optional. Without any, every recording still gets the same summary;
+a pack only adds background that the model cannot hear in the audio.
 
-| layer | what it decides | chosen by | file |
-|---|---|---|---|
-| 1. type | which pipeline template (lens) runs | inbox subfolder name | `packs/lenses/<lens>.<lang>.md` |
-| 2. style | shared output format for a family of groups | `style` key in match.json | `packs/styles/<style>.md` |
-| 3. pack | one recurring series: match rules, roster, context | filename keywords | `packs/<name>/` |
+There is one summary format for every recording
+(`packs/lenses/summary.<language>.md`, with shared rules in
+`_common.<language>.md`). A pack does not change that format. It adds:
 
-A type without a lens (`transcript: null` in config.yaml) stops at the
-diarized transcript.
-
-One further lens ships **inactive**: `conversation`, for recurring private
-conversations, where the record is the wording itself rather than decisions or
-per-person catch-up. It is not in the default `types:` — turn it on only after
-reading `packs/conversation/README.md`, which opens with a consent notice.
+- who the regulars are and how their names are spelled (the roster)
+- what the group's jargon and abbreviations mean
+- what was decided or left open in earlier rounds
 
 ## Pack directory anatomy
 
 ```
 packs/my-book-club/
-├── match.json    {"type": "gathering", "title_contains": ["scifi club"], "style": "bookclub"}
+├── match.json    {"title_contains": ["scifi club"]}
 ├── pack.md       curated background: what the group is, ROSTER, running context
 ├── session/      optional extra material (the newest .md is auto-loaded)
-└── _history/     auto-appended round cards — the pipeline only ever appends
+└── _history/     auto-appended round cards (the pipeline only ever appends)
 ```
 
-When a recording titled "scifi club week 12" lands in `inbox/gathering/`,
-the pack matches (keyword substring, longest keyword wins across packs),
-and the summary prompt gains: the style template + pack.md + the newest
-session file + strict usage rules (background is reference only — quotes
-and attribution still need transcript evidence).
+When a recording titled "scifi club week 12" lands in `inbox/`, the pack
+matches (keyword substring of the title, longest keyword wins across packs),
+and the summary prompt gains: pack.md + the newest session file + strict usage
+rules (background is reference only; quotes and attribution still need
+transcript evidence). A recording whose title matches no pack is summarized
+with no background at all.
+
+The pack name doubles as the group name for speaker tags
+(`moim-scribe enroll … --group my-book-club`).
 
 ## Round cards: accumulate, then curate
 
-After each successful summary, a *round card* (date, title, decisions/next-time
-sections if present) is appended to `_history/`. The pipeline **never edits
-pack.md** — merging history back into the curated background is deliberately
-a human step, so automated output can't silently rewrite your source of truth.
+After each successful summary, a *round card* (date, title, and the
+Decisions / Action items / Open items sections when the summary has them) is
+appended to `_history/`. The pipeline **never edits pack.md**: merging history
+back into the curated background is deliberately a human step, so automated
+output cannot silently rewrite your source of truth.
 
-## Onboarding a new series — checklist
+## Changing what every summary looks like
+
+Edit `packs/lenses/summary.<language>.md` in your workspace. If the file is not
+there (a workspace created before 0.2), the built-in copy is used; copy it from
+the package's `templates/lenses/` to start from it.
+
+If you rename the Decisions / Action items / Open items headings, round cards
+stop collecting those sections: they are harvested by heading.
+
+## Onboarding a new series: checklist
 
 1. Create `packs/<name>/` with `match.json` + `pack.md` (include the roster).
-2. Pick a style, or add a new one under `packs/styles/`.
-3. Check keyword collisions: a broad keyword can steal matches from other
+2. Check keyword collisions: a broad keyword can steal matches from other
    packs (longest-match helps, but avoid one-word generic keywords).
-4. After the first session, enroll the new voices from human-confirmed
-   ranges, then run `moim-scribe verify --expected <roster>` — see
+3. After the first session, enroll the new voices from human-confirmed
+   ranges, then run `moim-scribe verify --expected <roster>`. See
    [speaker-verification.md](speaker-verification.md).
+
+## Packs written before 0.2
+
+`"type"` and `"style"` in `match.json` are ignored, and `packs/styles/` is no
+longer read. Nothing needs to be deleted.

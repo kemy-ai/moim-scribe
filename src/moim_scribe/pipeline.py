@@ -12,6 +12,7 @@ Reliability rules inherited from the original production pipeline:
 """
 from __future__ import annotations
 
+import importlib.resources
 import logging
 import os
 import re
@@ -23,7 +24,7 @@ import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .config import AUDIO_EXTS, Config
+from .config import AUDIO_EXTS, SUMMARY_LENS, Config
 from .diarize import get_hf_token, run_diarization
 from .packs import build_block, save_card
 from .speaker_stats import render_speaker_stats_block
@@ -37,6 +38,7 @@ MIN_FILE_BYTES = 10_000
 STABILIZE_WAIT_SEC = 3.0
 PREFETCH_CHUNK_BYTES = 1 << 20
 PREFETCH_SLOW_SEC = 5.0  # above this, say so: the whole pass was held meanwhile
+MIN_ON_DISK_RATIO = 0.95  # see on_disk_ratio(): complete files measure 1.00
 
 PROMPT_HEADERS = {
     "ko": {
@@ -116,13 +118,42 @@ def _recording_time_block(audio_path: Path, language: str) -> str:
         return ""
 
 
+def _shipped_lens(lens: str, language: str) -> str | None:
+    """The copy of a lens that ships inside the package, or None.
+
+    Language order: the workspace language, then English. English is the
+    fallback because a workspace can be set to any whisper language code while
+    only two translations of the lens exist.
+    """
+    shipped = importlib.resources.files("moim_scribe") / "templates" / "lenses"
+    for candidate in (f"{lens}.{language}.md", f"{lens}.en.md"):
+        item = shipped / candidate
+        if item.is_file():
+            return item.read_text(encoding="utf-8")
+    return None
+
+
 def _load_lens(cfg: Config, lens: str) -> str:
-    """Load a lens with language fallback: <lens>.<lang>.md, then <lens>.md."""
+    """Load a lens: the workspace copy first, the shipped copy otherwise.
+
+    Workspace order is <lens>.<lang>.md, then <lens>.md, so a user's edited
+    lens always wins. Falling back to the package matters in two cases that
+    would otherwise fail the recording outright: a workspace created before
+    this lens existed (it has the old lens files and not this one), and a
+    workspace whose language has no translation of the lens.
+    """
     lenses_dir = cfg.packs_dir / "lenses"
     for candidate in (f"{lens}.{cfg.language}.md", f"{lens}.md"):
         p = lenses_dir / candidate
         if p.is_file():
             return p.read_text(encoding="utf-8")
+    shipped = _shipped_lens(lens, cfg.language)
+    if shipped is not None:
+        logger.info(
+            f"no {lens} lens in {lenses_dir}; using the built-in one "
+            f"(copy it there to customize)"
+        )
+        return shipped
     raise FileNotFoundError(f"lens not found: {lenses_dir}/{lens}[.{cfg.language}].md")
 
 
@@ -132,7 +163,10 @@ def _load_common_lens(cfg: Config) -> str:
         p = lenses_dir / candidate
         if p.is_file():
             return p.read_text(encoding="utf-8")
-    return ""
+    # Same fallback as _load_lens, and for a sharper reason: these are the
+    # rules that forbid guessing who a speaker is. A workspace missing the
+    # file used to get a prompt without them, with nothing to show for it.
+    return _shipped_lens("_common", cfg.language) or ""
 
 
 def _strip_preamble(summary: str) -> str:
@@ -234,11 +268,43 @@ def _prefetch(path: Path) -> None:
         )
 
 
+def on_disk_ratio(path: Path) -> float | None:
+    """Share of the file's logical size that is physically on disk, or None
+    when this platform cannot say.
+
+    🔴 This is the only check that sees a partial cloud download. A file that a
+    sync client is still fetching reports its *final* size from the start, the
+    first 0.1s decodes fine, and reading it can stop short without an error,
+    so the size check, the decode probe and the prefetch all pass. Upstream, a
+    recording that was 64.5% downloaded went through exactly that way and was
+    transcribed as if it were whole: 24 minutes of a 37-minute meeting, in a
+    deliverable that looked finished. Allocated blocks are the one number that
+    was different (64.5% there; 100.0% on every one of 25 complete files).
+
+    macOS only. That is where the placeholder mechanism measured above lives,
+    and on other systems the same arithmetic misfires: a compressing or
+    deduplicating filesystem legitimately stores fewer blocks than the logical
+    size, which would turn this guard into a permanent skip. Windows has no
+    st_blocks at all.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    blocks = getattr(st, "st_blocks", None)
+    if blocks is None or st.st_size <= 0:
+        return None
+    return blocks * 512 / st.st_size
+
+
 def is_stable_audio(path: Path) -> bool:
     """True when the file is fully present and decodable.
 
     Cloud placeholders report a final size while content is still syncing,
-    so a metadata check is not enough — the file must actually decode.
+    so a metadata check is not enough: the file must actually decode, and
+    (where the platform can tell) actually be on disk.
     """
     _prefetch(path)
     try:
@@ -252,6 +318,13 @@ def is_stable_audio(path: Path) -> bool:
         return False
     if s1 != s2 or s1 < MIN_FILE_BYTES:
         logger.info(f"SKIP still syncing/too small: {path.name} ({s1} -> {s2})")
+        return False
+    ratio = on_disk_ratio(path)
+    if ratio is not None and ratio < MIN_ON_DISK_RATIO:
+        logger.info(
+            f"SKIP only {ratio:.0%} of the file is on disk (cloud download in "
+            f"progress?): {path.name}"
+        )
         return False
     probe = subprocess.run(
         ["ffmpeg", "-v", "error", "-i", str(path), "-t", "0.1", "-f", "null", "-"],
@@ -283,18 +356,21 @@ def quarantine_leftovers(cfg: Config) -> None:
         logger.warning(f"stranded file quarantined to _error (previous crash): {f.name}")
 
 
-def process_recording(cfg: Config, claimed: Path, type_folder: str) -> Path:
+def process_recording(cfg: Config, claimed: Path) -> Path:
     """Run one claimed file end-to-end. Returns the primary result path.
+
+    Every recording takes the same route: diarize, name the speakers from the
+    fingerprint database, summarize with the one summary lens. What kind of
+    recording it is (a meeting, a call, a book club) is not asked.
 
     Raises on failure — the caller decides quarantine/cleanup.
     """
-    lens_name = cfg.types.get(type_folder, None)
     hint, title = filename_speaker_hint(claimed.stem, cfg.language)
     # The user's local date, timezone-explicit — result filenames must match
     # the day the user experienced, not the UTC day.
     date_tag = datetime.now(UTC).astimezone().strftime("%y%m%d")
     logger.info(
-        f"processing: {claimed.name} (type={type_folder}, title={title}"
+        f"processing: {claimed.name} (title={title}"
         + (f", speakers={hint} from filename)" if hint else ")")
     )
 
@@ -352,13 +428,33 @@ def process_recording(cfg: Config, claimed: Path, type_folder: str) -> Path:
     if jsonl_src.exists():
         shutil.copy2(jsonl_src, cfg.results_dir / f"{date_tag}_{title}_diarized.jsonl")
 
-    if lens_name is None:
-        logger.info(f"transcribe-only type — done: {out_txt}")
+    stats_path = Path(result["stats_path"])
+
+    # A fingerprint is compared against everyone enrolled, so as the database
+    # grows a name from a different recurring group can win. Say so; do not act
+    # on it — see speakers/groups.py for why this is a display and not a gate.
+    # The group of this recording is just the pack that matched, so there is
+    # nothing extra to configure, and when no pack matched the check is skipped
+    # rather than guessed at. It runs before the summarizer decision on
+    # purpose: a transcript-only setup names speakers too.
+    if stats_path.exists():
+        from .packs import find_matching_pack
+        from .speakers.groups import check_stats_file
+
+        _pack = find_matching_pack(cfg.packs_dir, title)
+        _note = check_stats_file(stats_path, _pack.name if _pack else None, db.load_index())
+        if _note:
+            logger.warning(_note)
+
+    # Decided before anything summary-related is loaded, so `summarizer: none`
+    # works in a workspace that has no lens files at all.
+    summarizer = get_summarizer(cfg.summarizer, cfg.summarizer_model, cfg.summarizer_timeout_sec)
+    if summarizer is None:
+        logger.info(f"summarizer=none, transcript only: {out_txt}")
         return out_txt
 
     h = _headers(cfg.language)
     rec_info = _recording_time_block(claimed, cfg.language)
-    stats_path = Path(result["stats_path"])
     # Filtered, never the raw file: some fields in speakers.json are diagnostics
     # that can name people who were not in the room, and the header right above
     # this block tells the model the attendee list comes from here.
@@ -375,22 +471,7 @@ def process_recording(cfg: Config, claimed: Path, type_folder: str) -> Path:
         logger.warning(
             "speaker stats block omitted — the summary will have no measured attendee count"
         )
-    ctx_block = build_block(cfg.packs_dir, type_folder, title, cfg.language)
-
-    # A fingerprint is compared against everyone enrolled, so as the database
-    # grows a name from a different recurring group can win. Say so; do not act
-    # on it — see speakers/groups.py for why this is a display and not a gate.
-    # The group of this recording is just the pack that matched, so there is
-    # nothing extra to configure, and when no pack matched the check is skipped
-    # rather than guessed at.
-    if stats_path.exists():
-        from .packs import find_matching_pack
-        from .speakers.groups import check_stats_file
-
-        _pack = find_matching_pack(cfg.packs_dir, type_folder, title)
-        _note = check_stats_file(stats_path, _pack.name if _pack else None, db.load_index())
-        if _note:
-            logger.warning(_note)
+    ctx_block = build_block(cfg.packs_dir, title, cfg.language)
 
     # The filename is the one name source a human set deliberately, at save
     # time, so for people's names it beats transcription: a self-introduction
@@ -399,17 +480,12 @@ def process_recording(cfg: Config, claimed: Path, type_folder: str) -> Path:
     # then thrown away, so the deliverable had no way to know it.
     title_block = h["rec_title"].format(title=title) + "\n"
     prompt = (
-        f"{_load_common_lens(cfg)}\n{_load_lens(cfg, lens_name)}\n\n"
+        f"{_load_common_lens(cfg)}\n{_load_lens(cfg, SUMMARY_LENS)}\n\n"
         f"{title_block}{rec_info}{spk_stats}{ctx_block}\n"
         f"{h['transcript']}\n{transcript_path.read_text(encoding='utf-8')}"
     )
 
-    summarizer = get_summarizer(cfg.summarizer, cfg.summarizer_model, cfg.summarizer_timeout_sec)
-    if summarizer is None:
-        logger.info("summarizer=none — transcript only")
-        return out_txt
-
-    out_md = cfg.results_dir / f"{date_tag}_{title}_{type_folder}.md"
+    out_md = cfg.results_dir / f"{date_tag}_{title}_summary.md"
     try:
         summary = summarizer.summarize(prompt)
     except Exception as e:
@@ -418,7 +494,7 @@ def process_recording(cfg: Config, claimed: Path, type_folder: str) -> Path:
         raise RuntimeError(f"summarization failed (transcript kept at {out_txt}): {e}") from e
     out_md.write_text(_strip_preamble(summary).strip() + "\n", encoding="utf-8")
     logger.info(f"summary: {out_md}")
-    save_card(cfg.packs_dir, type_folder, title, out_md)
+    save_card(cfg.packs_dir, title, out_md)
     return out_md
 
 
@@ -487,6 +563,27 @@ class PipelineLock:
         shutil.rmtree(self.lock_dir, ignore_errors=True)
 
 
+def inbox_folders(cfg: Config) -> list[Path]:
+    """The folders one pass looks in: inbox/ itself, then its direct subfolders.
+
+    Subfolders carry no meaning (a recording is processed the same wherever it
+    sits), but they are scanned so that (a) users can keep their own order
+    ("inbox/team/", "inbox/calls/") and (b) workspaces from before 0.2, which
+    sorted recordings into inbox/meeting/ and friends, keep working instead of
+    having files sit there unseen. Names starting with "_" are the pipeline's
+    own (_processing, _done, _error) and names starting with "." are hidden;
+    neither is ever input. One level only: a deep tree under inbox/ is more
+    likely an accident (a synced folder dropped in whole) than an instruction.
+    """
+    folders = [cfg.inbox_dir]
+    if cfg.inbox_dir.is_dir():
+        folders += sorted(
+            d for d in cfg.inbox_dir.iterdir()
+            if d.is_dir() and not d.name.startswith(("_", "."))
+        )
+    return [d for d in folders if d.is_dir()]
+
+
 def scan_inbox(cfg: Config) -> dict:
     """One inbox pass: stabilize, claim, process, and file the outcome.
 
@@ -499,12 +596,9 @@ def scan_inbox(cfg: Config) -> dict:
     try:
         quarantine_leftovers(cfg)
         counts = {"processed": 0, "failed": 0, "skipped": 0}
-        for type_folder in cfg.types:
-            folder = cfg.inbox_dir / type_folder
-            if not folder.is_dir():
-                continue
+        for folder in inbox_folders(cfg):
             for f in sorted(folder.iterdir()):
-                if not f.is_file() or not classify_audio(f):
+                if not f.is_file() or f.name.startswith(".") or not classify_audio(f):
                     continue
                 if not is_stable_audio(f):
                     counts["skipped"] += 1
@@ -524,7 +618,7 @@ def scan_inbox(cfg: Config) -> dict:
                     cfg.processing_dir / f"{stem}_speakers.json",
                 ]
                 try:
-                    process_recording(cfg, claimed, type_folder)
+                    process_recording(cfg, claimed)
                 except Exception as e:  # noqa: BLE001 — one bad file must not stop the pass
                     logger.error(f"FAILED -> _error: {claimed.name} — {e}")
                     for wp in work_products:

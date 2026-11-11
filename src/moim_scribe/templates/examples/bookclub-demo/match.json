@@ -1,5 +1,3 @@
 {
-  "type": "gathering",
-  "title_contains": ["demo book club", "데모 북클럽"],
-  "style": "bookclub"
+  "title_contains": ["demo book club", "데모 북클럽"]
 }

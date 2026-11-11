@@ -12,4 +12,4 @@ The transcript below has been speaker-diarized: lines carry `SPEAKER_00`,
 - If a background-knowledge block is present, treat it as **reference only**. Attribution, quotes, and decisions need evidence in the transcript itself.
 
 ---
-Below is the deliverable structure for this type.
+Below is the deliverable structure.

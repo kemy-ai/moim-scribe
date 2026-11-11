@@ -1,13 +1,12 @@
-"""Context packs: per-series background knowledge, styles, and round history.
+"""Context packs: optional per-series background knowledge and round history.
 
-Three layers decide how a recording is summarized:
-  1. type   — which lens (pipeline template) runs, chosen by inbox subfolder
-  2. style  — a shared output format for a family of groups (packs/styles/)
-  3. pack   — one recurring series: match rules, curated background,
-              attendee roster (packs/<name>/match.json + pack.md)
+Every recording is summarized with the same lens. A pack adds what the model
+cannot hear: who the regulars are, what the group's jargon means, what was
+left open last time. Packs are optional: with none, the prompt is exactly
+the plain one.
 
-A pack directory:
-  match.json   {"type": "gathering", "title_contains": ["book club"], "style": "bookclub"}
+A pack directory (packs/<name>/):
+  match.json   {"title_contains": ["book club"]}
   pack.md      human-curated background (roster, running context)
   session/     optional extra material (latest one .md auto-loaded)
   _history/    auto-appended round cards (curate back into pack.md by hand;
@@ -58,12 +57,12 @@ HEADER = {
 }
 
 # Section headers harvested into round cards (whichever exist in the output).
-# A lens whose sections are absent here produces an empty card — the harvest is
-# by header, so adding a lens means adding its carry-forward sections too.
+# The harvest is by header, so these must stay letter-for-letter equal to the
+# carry-forward sections of templates/lenses/summary.*.md (a test holds the
+# two together). A summary without any of them yields a header-only card.
 SECTION_HEADERS = [
-    "## 결정사항", "## 할 일", "## 보류·다음 논의", "## 다음 모임",
-    "## Decisions", "## Action items", "## Next meeting",
-    "## 합의된 것 · 열린 채로 남은 것", "## Agreed and left open",
+    "## 결정사항", "## 할 일", "## 보류·다음에 이어갈 것",
+    "## Decisions", "## Action items", "## Open items",
 ]
 
 
@@ -73,15 +72,15 @@ def _norm(s: str) -> str:
     return unicodedata.normalize("NFC", s or "").casefold()
 
 
-def find_matching_pack(packs_dir: Path, type_: str, title: str) -> Path | None:
-    """Find the pack whose match.json matches (type, title).
+def find_matching_pack(packs_dir: Path, title: str) -> Path | None:
+    """Find the pack whose match.json matches the recording title.
 
-    Match rule: normalized exact type match AND any title_contains keyword
-    being a substring of the title. Among multiple matches the longest
-    matched keyword wins (more specific beats more generic). A corrupt
-    match.json only skips that one pack.
+    Match rule: any title_contains keyword being a substring of the
+    normalized title. Among multiple matches the longest matched keyword wins
+    (more specific beats more generic). A corrupt match.json only skips that
+    one pack. Keys other than title_contains (the "type" and "style" of a
+    pre-0.2 pack) are ignored: the keyword alone decides.
     """
-    ntype = _norm(type_)
     ntitle = _norm(title)
     best_dir: Path | None = None
     best_kw = ""
@@ -92,8 +91,6 @@ def find_matching_pack(packs_dir: Path, type_: str, title: str) -> Path | None:
             logger.warning(f"match.json unreadable — skipped: {match_path} ({type(e).__name__}: {e})")
             continue
         if not isinstance(spec, dict):
-            continue
-        if _norm(str(spec.get("type", ""))) != ntype:
             continue
         keywords = spec.get("title_contains", [])
         if not isinstance(keywords, list):
@@ -124,46 +121,20 @@ def _read_text_safe(path: Path) -> str:
         return ""
 
 
-def build_block(packs_dir: Path, type_: str, title: str, language: str = "ko") -> str:
+def build_block(packs_dir: Path, title: str, language: str = "ko") -> str:
     """Assemble the background block injected into the summary prompt.
 
-    Order: style template (via match.json "style") + pack.md + latest
-    session file + usage rules. Empty string when nothing matches — the
-    caller then injects nothing and the prompt is exactly the plain one.
-    Bodies over MAX_BLOCK_CHARS are truncated from the end; the rules
-    block always survives.
+    Order: pack.md + latest session file + usage rules. Empty string when
+    nothing matches — the caller then injects nothing and the prompt is
+    exactly the plain one. Bodies over MAX_BLOCK_CHARS are truncated from the
+    end; the rules block always survives.
     """
-    pack_dir = find_matching_pack(packs_dir, type_, title)
+    pack_dir = find_matching_pack(packs_dir, title)
     if not pack_dir:
         return ""
 
     lang = language if language in RULES_BLOCK else "en"
     parts = []
-    try:
-        spec = json.loads((pack_dir / "match.json").read_text(encoding="utf-8"))
-        style_name = spec.get("style") if isinstance(spec, dict) else None
-    except (OSError, json.JSONDecodeError):
-        style_name = None
-    if style_name:
-        # Language fallback mirrors lenses: <style>.<lang>.md then <style>.md,
-        # so one pack works in workspaces of different languages.
-        style_path = next(
-            (
-                p
-                for p in (
-                    packs_dir / "styles" / f"{style_name}.{lang}.md",
-                    packs_dir / "styles" / f"{style_name}.md",
-                )
-                if p.is_file()
-            ),
-            None,
-        )
-        if style_path:
-            content = _read_text_safe(style_path)
-            if content:
-                parts.append(content)
-        else:
-            logger.warning(f"style '{style_name}' not found — skipped")
     pack_md = pack_dir / "pack.md"
     if pack_md.is_file():
         content = _read_text_safe(pack_md)
@@ -224,12 +195,11 @@ def _extract_sections(text: str, headers: list[str] = SECTION_HEADERS) -> list[s
     return sections
 
 
-def build_card(type_: str, title: str, out_md_path: str | Path) -> str:
-    """Round-card body: header (date, title, type, result path) + harvested sections."""
+def build_card(title: str, out_md_path: str | Path) -> str:
+    """Round-card body: header (date, title, result path) + harvested sections."""
     abs_path = str(Path(out_md_path).resolve())
     header = (
         f"# Round card — {title} ({_today_local().isoformat()})\n\n"
-        f"- type: {type_}\n"
         f"- result: {abs_path}"
     )
     try:
@@ -244,13 +214,13 @@ def build_card(type_: str, title: str, out_md_path: str | Path) -> str:
     return header + "\n\n" + "\n\n".join(sections) + "\n"
 
 
-def save_card(packs_dir: Path, type_: str, title: str, out_md_path: str | Path) -> None:
+def save_card(packs_dir: Path, title: str, out_md_path: str | Path) -> None:
     """Append a round card to the matched pack's _history/ (no-op when unmatched).
 
     Cards only accumulate; pack.md is never edited automatically — curation
     back into pack.md is a deliberate human step.
     """
-    pack_dir = find_matching_pack(packs_dir, type_, title)
+    pack_dir = find_matching_pack(packs_dir, title)
     if not pack_dir:
         return
     try:
@@ -258,7 +228,7 @@ def save_card(packs_dir: Path, type_: str, title: str, out_md_path: str | Path) 
         history_dir.mkdir(parents=True, exist_ok=True)
         stem = f"{_today_local().isoformat()}_{_safe_title(title)}"
         dest = _unique_history_path(history_dir, stem)
-        dest.write_text(build_card(type_, title, out_md_path), encoding="utf-8")
+        dest.write_text(build_card(title, out_md_path), encoding="utf-8")
         logger.info(f"round card saved: {dest}")
     except Exception as e:  # noqa: BLE001 — history is auxiliary, never fatal
         logger.warning(f"round card save failed (ignored): {type(e).__name__}: {e}")

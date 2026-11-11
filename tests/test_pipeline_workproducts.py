@@ -13,13 +13,13 @@ SUFFIXES = ("_transcript_diarized.jsonl", "_transcript_diarized.txt", "_speakers
 RESULT_JSONL = "260730_rec_diarized.jsonl"
 
 
-def _fake_process(cfg, claimed, type_folder):
+def _fake_process(cfg, claimed):
     """Stand in for process_recording: same side effects, no models."""
     for suffix in SUFFIXES:
         (cfg.processing_dir / f"{claimed.stem}{suffix}").write_text("x", encoding="utf-8")
     cfg.results_dir.mkdir(parents=True, exist_ok=True)
     (cfg.results_dir / RESULT_JSONL).write_text("x", encoding="utf-8")
-    out = cfg.results_dir / "260730_rec_meeting.md"
+    out = cfg.results_dir / "260730_rec_summary.md"
     out.write_text("# notes\n", encoding="utf-8")
     return out
 
@@ -27,7 +27,7 @@ def _fake_process(cfg, claimed, type_folder):
 def _run(tmp_path, monkeypatch, process=_fake_process):
     cfg = load_config(tmp_path)
     ensure_workspace_dirs(cfg)
-    (cfg.inbox_dir / "meeting" / "rec.m4a").write_bytes(b"x" * 20000)
+    (cfg.inbox_dir / "rec.m4a").write_bytes(b"x" * 20000)
     monkeypatch.setattr("moim_scribe.pipeline.is_stable_audio", lambda p: True)
     monkeypatch.setattr("moim_scribe.pipeline.process_recording", process)
     return cfg, scan_inbox(cfg)
@@ -54,8 +54,8 @@ def test_processing_dir_is_left_clean(tmp_path, monkeypatch):
 
 
 def test_failure_keeps_the_txt_for_diagnosis_and_quarantines_the_audio(tmp_path, monkeypatch):
-    def failing(cfg, claimed, type_folder):
-        _fake_process(cfg, claimed, type_folder)
+    def failing(cfg, claimed):
+        _fake_process(cfg, claimed)
         raise RuntimeError("boom")
 
     cfg, counts = _run(tmp_path, monkeypatch, process=failing)

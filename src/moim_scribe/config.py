@@ -5,12 +5,12 @@ A workspace is one visible folder holding everything moim-scribe touches:
     MyMeetings/
     ├── config.yaml        this file
     ├── glossary.txt       optional whisper prompt (domain proper nouns)
-    ├── inbox/             drop recordings into a type subfolder
-    │   ├── meeting/
-    │   ├── gathering/
-    │   └── transcript/
+    ├── inbox/             drop recordings here (any kind: they are all
+    │                      handled the same way; subfolders are allowed and
+    │                      mean nothing to the pipeline)
     ├── results/           summaries + transcripts land here
-    ├── packs/             lenses/ styles/ and per-series packs
+    ├── packs/             lenses/ (the summary template) and optional
+    │                      per-series background packs
     ├── speakers/          voice-fingerprint DB (biometric — never share)
     └── models/            local model caches
 
@@ -20,12 +20,20 @@ commit.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
 
-DEFAULT_TYPES = {"meeting": "meeting", "gathering": "gathering", "transcript": None}
+logger = logging.getLogger("moim_scribe.config")
+
+# The one summary template every recording goes through
+# (packs/lenses/<SUMMARY_LENS>.<language>.md). There used to be one lens per
+# recording type, chosen by inbox subfolder; sorting a recording into a type
+# before it could be processed was a decision the user had to make every time
+# and the pipeline gained little from it.
+SUMMARY_LENS = "summary"
 
 CONFIG_NAME = "config.yaml"
 
@@ -55,9 +63,6 @@ class Config:
     summarizer: str = "claude_cli"
     summarizer_model: str | None = None
     summarizer_timeout_sec: int = 900
-    # inbox subfolder name -> lens name (packs/lenses/<lens>.<language>.md).
-    # A None lens means transcribe-only.
-    types: dict = field(default_factory=lambda: dict(DEFAULT_TYPES))
     # Default speaker count when neither the filename nor a spoken cue gives
     # one. 0 = let pyannote estimate (best for 3+ person meetings); set 2 for
     # workspaces that are mostly 1:1 conversations.
@@ -132,8 +137,16 @@ def load_config(workspace: str | Path) -> Config:
     ):
         if key in raw and raw[key] is not None:
             setattr(cfg, key, raw[key])
-    if isinstance(raw.get("types"), dict):
-        cfg.types = raw["types"]
+    if "types" in raw:
+        # Workspaces created before 0.2 carry a `types:` map. Say it is no
+        # longer read rather than ignoring it in silence: a user who mapped a
+        # folder to "transcribe only" would otherwise start getting summaries
+        # with no hint as to why.
+        logger.warning(
+            "config.yaml: `types:` is no longer used: every recording in inbox/ "
+            "(and its subfolders) gets the same summary. For transcripts only, "
+            "set `summarizer: none`. You can delete the `types:` block."
+        )
     return cfg
 
 
@@ -143,7 +156,6 @@ def ensure_workspace_dirs(cfg: Config) -> None:
         cfg.inbox_dir,
         cfg.results_dir,
         cfg.packs_dir / "lenses",
-        cfg.packs_dir / "styles",
         cfg.speakers_dir,
         cfg.models_dir,
         cfg.processing_dir,
@@ -151,5 +163,3 @@ def ensure_workspace_dirs(cfg: Config) -> None:
         cfg.error_dir,
     ):
         d.mkdir(parents=True, exist_ok=True)
-    for type_folder in cfg.types:
-        (cfg.inbox_dir / type_folder).mkdir(parents=True, exist_ok=True)

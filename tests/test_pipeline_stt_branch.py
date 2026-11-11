@@ -46,7 +46,7 @@ def test_soniox_path_does_not_resolve_a_hugging_face_token(ws, monkeypatch):
     monkeypatch.setattr("moim_scribe.diarize_cloud.run_cloud_diarization", _reach)
 
     with pytest.raises(_Reached):
-        pipeline.process_recording(cfg, audio, "meeting")
+        pipeline.process_recording(cfg, audio)
 
 
 def test_local_path_still_resolves_the_token(ws, monkeypatch):
@@ -60,7 +60,7 @@ def test_local_path_still_resolves_the_token(ws, monkeypatch):
     monkeypatch.setattr(pipeline, "run_diarization", _reach)
 
     with pytest.raises(_Reached):
-        pipeline.process_recording(cfg, audio, "meeting")
+        pipeline.process_recording(cfg, audio)
     assert called == ["hf"]
 
 
@@ -74,7 +74,7 @@ def test_local_path_does_not_look_for_a_soniox_key(ws, monkeypatch):
     monkeypatch.setattr(pipeline, "run_diarization", _reach)
 
     with pytest.raises(_Reached):
-        pipeline.process_recording(cfg, audio, "meeting")
+        pipeline.process_recording(cfg, audio)
 
 
 def test_soniox_path_passes_region_and_language_through(ws, monkeypatch):
@@ -91,7 +91,7 @@ def test_soniox_path_passes_region_and_language_through(ws, monkeypatch):
     monkeypatch.setattr("moim_scribe.stt.soniox_client.get_api_key", lambda *a, **k: "key")
     monkeypatch.setattr("moim_scribe.diarize_cloud.run_cloud_diarization", capture)
     with pytest.raises(_Reached):
-        pipeline.process_recording(cfg, audio, "meeting")
+        pipeline.process_recording(cfg, audio)
 
     assert seen["region"] == "eu"
     assert seen["language_hints"] == ["en"]
@@ -108,7 +108,7 @@ def test_a_missing_soniox_key_is_catchable_not_fatal(ws, monkeypatch):
     monkeypatch.delenv("SONIOX_API_KEY", raising=False)
 
     try:
-        pipeline.process_recording(cfg, audio, "meeting")
+        pipeline.process_recording(cfg, audio)
     except Exception as e:  # noqa: BLE001 — being catchable here is the assertion
         assert "soniox" in str(e).lower()
     else:

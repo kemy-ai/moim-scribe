@@ -1,9 +1,9 @@
 """moim-scribe command line interface.
 
-    moim-scribe init [workspace]        create a workspace skeleton + example packs
+    moim-scribe init [workspace]        create a workspace skeleton
     moim-scribe watch [workspace]       watch the inbox and process recordings
     moim-scribe scan-inbox [workspace]  one inbox pass (for cron / Task Scheduler)
-    moim-scribe process AUDIO --type T  process a single file in place
+    moim-scribe process AUDIO           process a single file in place
     moim-scribe enroll AUDIO JSONL SPEAKER_00=Name ...   enroll fingerprints
     moim-scribe speakers [workspace]    list enrolled speakers
     moim-scribe verify AUDIO TXT        verify labels in a finished transcript
@@ -53,15 +53,11 @@ stt_backend: {stt_backend}
 #   anthropic_api needs ANTHROPIC_API_KEY — sends the transcript to Anthropic
 #   ollama        local model, fully offline (needs Ollama running)
 #   none          stop after transcription — nothing leaves this machine
+# Every recording gets the same summary, whatever kind of recording it is.
+# The template is packs/lenses/summary.<language>.md; edit it to taste.
 summarizer: claude_cli
 # summarizer_model: null     # e.g. sonnet / claude-sonnet-5 / llama3.1
 # summarizer_timeout_sec: 900
-
-# inbox subfolder -> lens (template in packs/lenses/). null = transcribe only.
-types:
-  meeting: meeting
-  gathering: gathering
-  transcript: null
 
 # Speaker count when neither the filename ("... 5명" / "... 5p") nor a spoken
 # cue at the start of the recording gives one. 0 = auto-estimate.
@@ -97,13 +93,12 @@ def cmd_init(args) -> int:
     ensure_workspace_dirs(cfg)
 
     templates = importlib.resources.files("moim_scribe") / "templates"
-    for sub in ("lenses", "styles"):
-        src_dir = templates / sub
-        dst_dir = cfg.packs_dir / sub
-        for item in src_dir.iterdir():
-            dst = dst_dir / item.name
-            if not dst.exists():
-                dst.write_text(item.read_text(encoding="utf-8"), encoding="utf-8")
+    src_dir = templates / "lenses"
+    dst_dir = cfg.packs_dir / "lenses"
+    for item in src_dir.iterdir():
+        dst = dst_dir / item.name
+        if not dst.exists():
+            dst.write_text(item.read_text(encoding="utf-8"), encoding="utf-8")
     examples_dir = templates / "examples"
     for pack in examples_dir.iterdir():
         dst_pack = cfg.packs_dir / pack.name
@@ -145,7 +140,7 @@ def cmd_init(args) -> int:
     print(f"     (docs/setup-pyannote.md) and save it to {ws}/.hf_token")
     print("     — or set stt_backend: soniox in config.yaml to transcribe in the")
     print("       cloud instead, which needs no token but uploads the audio")
-    print("  2. drop a recording into inbox/meeting/ (or gathering/, transcript/)")
+    print("  2. drop a recording into inbox/")
     print(f"  3. run: moim-scribe watch {ws}")
     return 0
 
@@ -178,14 +173,15 @@ def cmd_process(args) -> int:
     if not src.exists():
         print(f"not found: {src}")
         return 1
-    if args.type not in cfg.types:
-        print(f"unknown type '{args.type}' — config.yaml types: {', '.join(cfg.types)}")
-        return 1
+    if args.type:
+        # Accepted so that pre-0.2 scripts keep running, and said out loud so
+        # that nobody expects a type-specific result from it.
+        print(f"note: --type {args.type} is ignored: every recording gets the same summary")
     # Work on a copy claimed into _processing; the user's original stays put.
     claimed = cfg.processing_dir / src.name
     shutil.copy2(src, claimed)
     try:
-        out = process_recording(cfg, claimed, args.type)
+        out = process_recording(cfg, claimed)
         print(f"result: {out}")
         return 0
     finally:
@@ -379,7 +375,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("process", help="process one audio file in place")
     p.add_argument("audio")
-    p.add_argument("--type", required=True, help="a type from config.yaml (e.g. meeting)")
+    p.add_argument("--type", default=None, help=argparse.SUPPRESS)  # pre-0.2, ignored
     p.add_argument("--workspace", default=".")
     p.set_defaults(func=cmd_process)
 

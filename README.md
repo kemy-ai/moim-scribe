@@ -2,7 +2,7 @@
 
 **A local-first voice pipeline built for recurring meetings — the more often the same people meet, the more accurate it gets.**
 
-*moim* (모임) is Korean for a small recurring gathering — a book club, a writing circle, a weekly team sync. moim-scribe watches a folder, and when a recording lands in it: transcribes (whisper) → separates speakers (pyannote) → **matches voices against a fingerprint database that grows with every session** → writes structured notes using the template for that type of meeting. Voice fingerprints are always local. Two steps are yours to choose: transcription runs on your machine by default and can instead go to Soniox, and summarization can be local (Ollama, or none) or a cloud LLM (Claude).
+*moim* (모임) is Korean for a small recurring gathering — a book club, a writing circle, a weekly team sync. moim-scribe watches a folder, and when a recording lands in it: transcribes (whisper) → separates speakers (pyannote) → **matches voices against a fingerprint database that grows with every session** → writes a summary. It does not ask what kind of recording it is: a meeting, a call and a book club all go into the same folder and come out in the same format. Voice fingerprints are always local. Two steps are yours to choose: transcription runs on your machine by default and can instead go to Soniox, and summarization can be local (Ollama, or none) or a cloud LLM (Claude).
 
 > **Consent first.** moim-scribe is built for groups that record themselves with everyone's informed consent. Voice fingerprints are biometric data — never use this tool to record or identify people covertly. **This bites hardest in private relationships**: a conversation with a partner or a family member is where one side is most tempted to record without saying so, and precisely where you must not. In many jurisdictions that is illegal, not just impolite: [docs/privacy.md](docs/privacy.md).
 
@@ -15,8 +15,8 @@ flowchart TD
     subgraph machine["on your machine"]
         A["inbox/<br>recording lands"] --> B["transcribe + diarize<br>whisper (mlx / faster) + pyannote<br>(soniox: its text + pyannote boundaries)"]
         FP[("speaker fingerprints<br>grow every session")] <--> B
-        B --> C["summarize with your group's<br>lens · style · pack"]
-        C --> D["results/<br>notes md + diarized transcript"]
+        B --> C["summarize<br>one summary lens for every recording<br>(+ your background pack, if any)"]
+        C --> D["results/<br>summary md + diarized transcript"]
         V["enroll · verify commands"] -.-> FP
     end
     B -.->|"the audio itself, and only<br>with stt: soniox"| STT["Soniox<br>cloud STT"]
@@ -25,6 +25,28 @@ flowchart TD
 
 Fingerprints never cross the dashed line. Two things can, each only if you choose it: the audio (`stt: soniox`) and the transcript (a cloud summarizer). With the defaults changed to `soniox` + `none`, the recording leaves and the transcript does not; with `mlx` + `ollama`, nothing leaves at all.
 
+## What is in the box
+
+**Core: works as soon as it is installed.**
+
+| | what it does |
+|---|---|
+| **Speaker separation** | splits the recording by who spoke when (`SPEAKER_00`, `SPEAKER_01` …) |
+| **Voice fingerprints** | you confirm who is who once; from the next recording on, those people are named automatically |
+| **Summary** | one summary format for every recording, with attendees, talk share, what was discussed, decisions and action items when there are any |
+
+**Optional: off until you set it up, and the core does not depend on any of it.**
+
+| | what it adds | where |
+|---|---|---|
+| Cloud transcription | Soniox instead of a local whisper model (uploads the audio) | [docs/setup-soniox.md](docs/setup-soniox.md) |
+| Background packs | a recurring group's roster and running context, added to the summary prompt | [docs/packs.md](docs/packs.md) |
+| Group tags | a log line when a voice match comes from a different group | "Teaching it who's who" below |
+| Label verification | cross-check a finished transcript against fingerprints | [docs/speaker-verification.md](docs/speaker-verification.md) |
+| Background service | launchd / systemd / Task Scheduler templates | [docs/deployment.md](docs/deployment.md) |
+
+**Not included.** Publishing to Notion or other tools, chat notifications (Slack and the like), and phone-to-computer intake are deliberately left out. A cloud-synced folder (iCloud Drive, Google Drive, Dropbox) works as the inbox with no integration at all, and anything else can be built around `results/`, which is plain files.
+
 ## Why another whisper + pyannote script?
 
 One-shot diarization scripts treat every recording as a room full of strangers. Recurring groups aren't: it's the same six people every other week. moim-scribe exploits that.
@@ -32,7 +54,7 @@ One-shot diarization scripts treat every recording as a room full of strangers. 
 - **Accumulating voice fingerprints.** Confirm who's who once, and each speaker's ECAPA embedding is stored and refined (speech-seconds weighted average) every time they appear. `SPEAKER_03` becomes a real name automatically from the second session on.
 - **Merge repair.** pyannote's classic failure — two similar voices fused into one cluster — is detected by re-checking segments against enrolled fingerprints, and the transcript is re-labeled. Unenrolled guests are never touched. Relabeling only applies when every anchor shows segment-level evidence of actually being in the recording; otherwise the repair is withheld and the reason is recorded (a wrong name is worse than no name).
 - **Anti-hallucination transcription.** Whisper's repetition loops (the same phrase 17 times at exactly 1.0s intervals) are suppressed at decode time and collapsed deterministically afterwards.
-- **Per-group templates (packs).** A meeting produces minutes; a book club produces per-participant discussion notes; your group's roster and running context ride along in the prompt. See [docs/packs.md](docs/packs.md).
+- **One summary, no sorting.** You never tell it what kind of recording this is. The summary keeps the sections that have something in them (decisions, action items, open items) and drops the rest, so a meeting reads like minutes and a catch-up reads like a catch-up. Optionally, a recurring group's roster and running context ride along in the prompt: [docs/packs.md](docs/packs.md).
 - **Honest labels.** Verification tooling (`moim-scribe verify`) cross-checks finished transcripts against fingerprints and your attendee roster, following rules learned from real mislabeling incidents. See [docs/speaker-verification.md](docs/speaker-verification.md).
 
 ## Platform support
@@ -80,13 +102,13 @@ echo "hf_..." > ~/MyMeetings/.hf_token
 
 moim-scribe doctor ~/MyMeetings        # checks ffmpeg, backends, token
 
-# drop a recording into a type folder:
-cp recording.m4a ~/MyMeetings/inbox/gathering/
+# drop a recording into the inbox (any kind of recording):
+cp recording.m4a ~/MyMeetings/inbox/
 
 moim-scribe watch ~/MyMeetings         # or scan-inbox for a single pass
 ```
 
-Results land in `results/` as `YYMMDD_title_type.md` plus the full diarized transcript. Tips that remove guesswork:
+Results land in `results/` as `YYMMDD_title_summary.md` plus the full diarized transcript. Want transcripts only? Set `summarizer: none`. Tips that remove guesswork:
 
 - put the attendee count in the filename — `book club 5명.m4a` / `standup 4p.m4a`
 - or say it at the start of the recording ("참석자 다섯 명입니다" / "five participants today")
@@ -125,7 +147,7 @@ Only enroll ranges a human has confirmed — the discipline that keeps the datab
 | `ollama` | Ollama running locally | no — nothing leaves at this step |
 | `none` | nothing | no — stops at the diarized transcript |
 
-Switch in `config.yaml`. Lenses ship in Korean and English (`--language`). This table is about the transcript only — whether the *audio* leaves is the separate `stt` choice above.
+Switch in `config.yaml`. The summary template ships in Korean and English (`--language`) and lives in your workspace at `packs/lenses/summary.<language>.md`; edit it to change what every summary looks like. This table is about the transcript only — whether the *audio* leaves is the separate `stt` choice above.
 
 ## Privacy and consent — read this
 
@@ -139,13 +161,24 @@ Details: [docs/privacy.md](docs/privacy.md).
 
 ## Running it in the background
 
-launchd (macOS), systemd (Linux), and Task Scheduler (Windows) templates: [docs/deployment.md](docs/deployment.md). Cloud-synced folders (Drive/Dropbox) work — the pipeline double-checks that files are fully downloaded and decodable before touching them.
+launchd (macOS), systemd (Linux), and Task Scheduler (Windows) templates: [docs/deployment.md](docs/deployment.md). Cloud-synced folders (iCloud Drive, Google Drive, Dropbox) work as the inbox: before touching a file the pipeline checks that it decodes and, on macOS, that it is physically on disk. A file that is still downloading reports its final size and plays from the start, so those two alone let a partly downloaded recording through.
 
 ## Maintenance
 
 Best-effort: issues and PRs are read, response time is not guaranteed. Forks welcome.
 
-## Roadmap (not in v0.1)
+## Upgrading from 0.1
+
+0.2 removes recording types. What that means for an existing workspace:
+
+- **Folders.** Recordings no longer have to be sorted into `inbox/meeting/`, `inbox/gathering/` or `inbox/transcript/`. Those folders keep working (direct subfolders of `inbox/` are still scanned), but they no longer change anything.
+- **`types:` in `config.yaml`** is ignored, and a log line says so. If you used a transcribe-only folder, set `summarizer: none` instead; it now applies to the whole workspace.
+- **Lenses.** `meeting`, `gathering` and `conversation` are gone, along with `packs/styles/`. Nothing needs to be done: a workspace with no `packs/lenses/summary.<language>.md` uses the built-in one. To customize it, copy the file from the package's `templates/lenses/` into `packs/lenses/` and edit it. Old lens files left in `packs/lenses/` are harmless and unused.
+- **Packs.** `"type"` and `"style"` in `match.json` are ignored; the title keyword alone decides.
+- **File names.** Summaries are now `YYMMDD_title_summary.md`.
+- **`moim-scribe process`** no longer needs `--type` (it is accepted and ignored).
+
+## Roadmap (not in v0.2)
 
 - Publishing plugins (Notion etc.) and completion notifications
 - English field-testing of the `faster` backend at tier-1 level

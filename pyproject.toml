@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "moim-scribe"
-version = "0.1.0"
-description = "Local-first voice pipeline for recurring meetings: watch a folder, diarize with accumulating voice fingerprints, and summarize with per-group templates"
+version = "0.2.0"
+description = "Local-first voice pipeline for recurring meetings: watch a folder, split speakers, name them from accumulating voice fingerprints, and summarize"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
