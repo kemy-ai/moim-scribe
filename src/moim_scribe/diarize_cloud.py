@@ -283,8 +283,11 @@ def run_cloud_diarization(
             input_path, merged, raw_labels, speaker_db, model_dir, identify
         )
 
+        # The two-voice check ran inside identify_and_repair (display only; every
+        # Exception and SystemExit from it is absorbed there).
         out_jsonl, out_txt, out_speakers, speakers_json = write_outputs(
-            session, prefix, merged, id_mapping, id_sims, merge_info
+            session, prefix, merged, id_mapping, id_sims, merge_info,
+            mixed_info=merge_info.get("mixed_check"),
         )
         logger.info(f"done -> {out_txt} ({time.time() - t0:.0f}s total)")
     finally:

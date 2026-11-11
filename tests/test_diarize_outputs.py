@@ -15,8 +15,14 @@ from moim_scribe.diarize import write_outputs
 # "anchors" and "suspects" are built by comparing against the whole enrolment
 # DB, so they can name people who were not in the room, and every new field
 # needs a deliberate call on whether it may reach a summarizer prompt.
-KNOWN_TOP_KEYS = {"n_speakers", "speakers", "merge_reassign"}
-KNOWN_ENTRY_KEYS = {"label", "talk_sec", "share", "identified", "raw_speaker", "match_score"}
+# n_labels_total: list length when noise labels were counted out (prompt
+# filter drops it). mixed_check_diag: two-voice check (diagnostic only).
+KNOWN_TOP_KEYS = {"n_speakers", "speakers", "merge_reassign", "n_labels_total", "mixed_check_diag"}
+# leftover_noise: the entry is removed from prompts. mixed_suspect_diag: diagnostic.
+KNOWN_ENTRY_KEYS = {
+    "label", "talk_sec", "share", "identified", "raw_speaker", "match_score",
+    "leftover_noise", "mixed_suspect_diag",
+}
 # presence_unconfirmed: the presence gate's withhold reason (anchor names on
 # purpose — post-hoc diagnosis; speaker_stats drops it before any prompt).
 KNOWN_MERGE_REASSIGN_KEYS = {
@@ -32,6 +38,14 @@ TRIGGERED_MERGE_INFO = {
 }
 
 
+MIXED_INFO = {
+    "checked": 1,
+    "suspects": {"SPEAKER_00": {"label": "Ada", "n_long_blocks": 9, "minor_share": 0.3,
+                                "minor_sec": 40.0, "centroid_sim": 0.5, "sub_own_sim": None}},
+    "skipped": {}, "metrics": {}, "error": None, "params": {}, "reassigned": True,
+}
+
+
 def _merged():
     return [
         {"start": 0.0, "end": 10.0, "speaker": "Ada", "text": "first"},
@@ -40,7 +54,13 @@ def _merged():
     ]
 
 
-def _write(tmp_path, merged=None, id_mapping=None, id_sims=None, merge_info=None):
+def _maximal_merged():
+    """Every optional field fires: identified, unidentified, and a noise label."""
+    return [*_merged(), {"start": 15.0, "end": 15.5, "speaker": "SPEAKER_02", "text": "uh"}]
+
+
+def _write(tmp_path, merged=None, id_mapping=None, id_sims=None, merge_info=None,
+           mixed_info=None):
     return write_outputs(
         str(tmp_path),
         "rec_",
@@ -48,6 +68,7 @@ def _write(tmp_path, merged=None, id_mapping=None, id_sims=None, merge_info=None
         {} if id_mapping is None else id_mapping,
         {} if id_sims is None else id_sims,
         dict(CLEAN_MERGE_INFO) if merge_info is None else merge_info,
+        mixed_info=mixed_info,
     )
 
 
@@ -154,7 +175,11 @@ def test_merge_reassign_written_when_presence_gate_withheld(tmp_path):
 
 
 def test_top_level_keys_within_allow_list(tmp_path):
-    *_, data = _write(tmp_path, merge_info=TRIGGERED_MERGE_INFO)
+    *_, data = _write(tmp_path, merged=_maximal_merged(), merge_info=TRIGGERED_MERGE_INFO,
+                      mixed_info=MIXED_INFO)
+    # The maximal fixture must actually emit the optional keys, or this canary
+    # is checking a smaller schema than the one that ships.
+    assert {"n_labels_total", "mixed_check_diag", "merge_reassign"} <= set(data)
     extra = set(data) - KNOWN_TOP_KEYS
     assert not extra, f"unclassified top-level key(s): {extra} — is it prompt-safe?"
 
@@ -162,10 +187,14 @@ def test_top_level_keys_within_allow_list(tmp_path):
 def test_speaker_entry_keys_within_allow_list(tmp_path):
     *_, data = _write(
         tmp_path,
+        merged=_maximal_merged(),
         id_mapping={"SPEAKER_00": "Ada"},
         id_sims={"SPEAKER_00": [("Ada", 0.9)]},
         merge_info=TRIGGERED_MERGE_INFO,
+        mixed_info=MIXED_INFO,
     )
+    emitted = set().union(*(set(e) for e in data["speakers"]))
+    assert {"leftover_noise", "mixed_suspect_diag", "match_score"} <= emitted
     for entry in data["speakers"]:
         extra = set(entry) - KNOWN_ENTRY_KEYS
         assert not extra, f"unclassified speakers[] key(s): {extra} — is it prompt-safe?"
@@ -178,7 +207,10 @@ def test_merge_reassign_keys_within_allow_list(tmp_path):
     one — these values come from a whole-DB comparison — but a two-level canary
     would not see it.
     """
-    *_, data = _write(tmp_path, merge_info=TRIGGERED_MERGE_INFO)
+    # merge_info also carries the internal "mixed_check" key, the way
+    # identify_and_repair returns it; the writer's allow-list must not copy it.
+    *_, data = _write(tmp_path, merge_info={**TRIGGERED_MERGE_INFO, "mixed_check": MIXED_INFO},
+                      mixed_info=MIXED_INFO)
     extra = set(data["merge_reassign"]) - KNOWN_MERGE_REASSIGN_KEYS
     assert not extra, f"unclassified merge_reassign key(s): {extra} — is it prompt-safe?"
 
