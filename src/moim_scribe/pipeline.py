@@ -336,6 +336,31 @@ def is_stable_audio(path: Path) -> bool:
     return True
 
 
+ARCHIVE_SIDECARS = ("_transcript_diarized.txt", "_speakers.json")
+
+
+def archive_stem(dest_dir: Path, stem: str, suffix: str) -> str:
+    """A stem under which nothing of this recording's set exists in dest_dir yet.
+
+    _done and _error keep the original recording. A recurring group tends to
+    save every session under the same name ("book club 5p.m4a" every week),
+    and a plain move onto an existing name replaces the older original without
+    a word, along with its transcript. So a taken name gets " (2)", " (3)", ...
+    and the recording and its sidecar files move under the same new stem, so
+    they still pair up.
+    """
+    def taken(s: str) -> bool:
+        return (dest_dir / f"{s}{suffix}").exists() or any(
+            (dest_dir / f"{s}{side}").exists() for side in ARCHIVE_SIDECARS
+        )
+
+    candidate, n = stem, 2
+    while taken(candidate):
+        candidate = f"{stem} ({n})"
+        n += 1
+    return candidate
+
+
 def quarantine_leftovers(cfg: Config) -> None:
     """Move files stranded in _processing (a previous crash) to _error.
 
@@ -352,7 +377,8 @@ def quarantine_leftovers(cfg: Config) -> None:
         for junk in cfg.processing_dir.glob(f"{stem}_transcript_diarized.*"):
             junk.unlink(missing_ok=True)
         (cfg.processing_dir / f"{stem}_speakers.json").unlink(missing_ok=True)
-        shutil.move(str(f), cfg.error_dir / f.name)
+        dest = archive_stem(cfg.error_dir, stem, f.suffix)
+        shutil.move(str(f), cfg.error_dir / f"{dest}{f.suffix}")
         logger.warning(f"stranded file quarantined to _error (previous crash): {f.name}")
 
 
@@ -621,12 +647,13 @@ def scan_inbox(cfg: Config) -> dict:
                     process_recording(cfg, claimed)
                 except Exception as e:  # noqa: BLE001 — one bad file must not stop the pass
                     logger.error(f"FAILED -> _error: {claimed.name} — {e}")
+                    dest = archive_stem(cfg.error_dir, stem, claimed.suffix)
                     for wp in work_products:
                         if wp.name.endswith("_transcript_diarized.txt") and wp.exists():
-                            shutil.move(str(wp), cfg.error_dir / wp.name)
+                            shutil.move(str(wp), cfg.error_dir / f"{dest}{wp.name[len(stem):]}")
                         else:
                             wp.unlink(missing_ok=True)
-                    shutil.move(str(claimed), cfg.error_dir / claimed.name)
+                    shutil.move(str(claimed), cfg.error_dir / f"{dest}{claimed.suffix}")
                     counts["failed"] += 1
                     continue
 
@@ -639,10 +666,16 @@ def scan_inbox(cfg: Config) -> dict:
                 # copy — if it ever stops happening, the recording becomes
                 # permanently un-enrollable. Keep the two in sync.
                 work_products[0].unlink(missing_ok=True)
+                # A recurring name must not replace last session's original
+                # (see archive_stem).
+                dest = archive_stem(cfg.done_dir, stem, claimed.suffix)
                 for wp in work_products[1:]:
                     if wp.exists():
-                        shutil.move(str(wp), cfg.done_dir / wp.name)
-                shutil.move(str(claimed), cfg.done_dir / claimed.name)
+                        shutil.move(str(wp), cfg.done_dir / f"{dest}{wp.name[len(stem):]}")
+                shutil.move(str(claimed), cfg.done_dir / f"{dest}{claimed.suffix}")
+                if dest != stem:
+                    logger.info(f"_done already had {claimed.name}; kept both, this one "
+                                f"as {dest}{claimed.suffix}")
                 logger.info(f"done: {claimed.name}")
                 counts["processed"] += 1
         return counts
