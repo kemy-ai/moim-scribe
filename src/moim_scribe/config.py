@@ -63,6 +63,12 @@ _SCALAR_KEYS = (
 )
 _KNOWN_KEYS = frozenset(_SCALAR_KEYS) | {"stt", "types"}
 
+SONIOX_REGIONS = ("us", "eu", "jp")
+
+# What a bare `types:` (the key with nothing after it) meant in 0.1: the
+# built-in map. Two folders were summarized, `transcript/` was transcribed only.
+LEGACY_DEFAULT_TYPES = {"meeting": "meeting", "gathering": "gathering", "transcript": None}
+
 
 class ConfigError(ValueError):
     """config.yaml is unusable. The message says what to fix; the CLI prints it."""
@@ -207,6 +213,18 @@ def _validate(cfg: Config) -> None:
     t = cfg.summarizer_timeout_sec
     if isinstance(t, bool) or not isinstance(t, (int, float)) or t <= 0:
         raise _bad(f"summarizer_timeout_sec must be a number > 0, got {t!r}")
+    # A quoted "false" is a non-empty string, so it would read as true.
+    if not isinstance(cfg.hybrid_diarization, bool):
+        raise _bad(
+            f"hybrid_diarization must be true or false (without quotes), got "
+            f"{cfg.hybrid_diarization!r}"
+        )
+    if not isinstance(cfg.soniox_region, str) or cfg.soniox_region not in SONIOX_REGIONS:
+        hint = _hint(cfg.soniox_region, SONIOX_REGIONS) if isinstance(cfg.soniox_region, str) else ""
+        raise _bad(
+            f"unknown soniox_region {cfg.soniox_region!r}{hint}: expected one of "
+            f"{', '.join(SONIOX_REGIONS)}"
+        )
 
 
 def load_config(workspace: str | Path) -> Config:
@@ -246,6 +264,17 @@ def load_config(workspace: str | Path) -> Config:
                 f"`stt: {raw['stt']}` and `stt_backend: {raw['stt_backend']}` disagree: "
                 "they are the same setting, keep only stt_backend"
             )
+        if raw.get("stt_backend") is None:
+            # The loader before 0.2 ignored `stt:`. Honoring it now can change
+            # what leaves the machine after an upgrade, so it is said out loud.
+            upload = (
+                " This UPLOADS the audio of every recording to Soniox."
+                if raw["stt"] == "soniox" else ""
+            )
+            logger.warning(
+                "config.yaml: `stt` is read as `stt_backend`: %s.%s Rename the key to "
+                "stt_backend to make this explicit.", raw["stt"], upload,
+            )
         raw = {**raw, "stt_backend": raw["stt"]}
 
     cfg = Config(workspace=ws)
@@ -259,15 +288,16 @@ def load_config(workspace: str | Path) -> Config:
         logger.info("config.yaml: summarizer is %s, treated as 'none' (transcripts only)", raw["summarizer"])
     _validate(cfg)
 
-    if raw.get("types") is not None:
+    if "types" in raw:
         # Workspaces created before 0.2 carry a `types:` map. 0.1 scanned only
         # the folders it names, so while the block is there so do we, and
         # folders mapped to null stay transcript-only (a folder someone chose
         # so that its transcripts are not sent to a summarizer must not start
-        # sending them on upgrade).
-        if not isinstance(raw["types"], dict):
+        # sending them on upgrade). A bare `types:` meant 0.1's built-in map,
+        # so it is read as that map and not as "no block".
+        legacy = LEGACY_DEFAULT_TYPES if raw["types"] is None else raw["types"]
+        if not isinstance(legacy, dict):
             raise _bad("`types:` must be a mapping of folder names (it is a leftover of 0.1)")
-        legacy = raw["types"]
         cfg.legacy_type_folders = frozenset(normalize_folder_name(n) for n in legacy)
         cfg.transcript_only_folders = frozenset(
             normalize_folder_name(n) for n, lens in legacy.items() if lens is None

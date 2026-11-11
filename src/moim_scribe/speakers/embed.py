@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -39,7 +40,7 @@ def get_model(model_dir: Path):
     global _model, _model_dir
     if _model is not None and _model_dir == model_dir:
         return _model
-    if model_dir.exists() and any(model_dir.iterdir()):
+    if model_dir.exists() and any(not _is_temp_copy(p) for p in model_dir.iterdir()):
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
         os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
     import torch  # noqa: F401  (ensures a clear error if torch is missing)
@@ -54,6 +55,15 @@ def get_model(model_dir: Path):
     materialize_symlinks(model_dir)
     _model_dir = model_dir
     return _model
+
+
+# materialize_symlinks writes each copy under "<name><TEMP_COPY_MARK><pid>-<random>"
+# first. A run killed mid-copy can leave one behind; it is never a model file.
+TEMP_COPY_MARK = ".copying-"
+
+
+def _is_temp_copy(path: Path) -> bool:
+    return TEMP_COPY_MARK in path.name or path.name.endswith(".copying")
 
 
 def materialize_symlinks(model_dir: Path) -> int:
@@ -75,15 +85,27 @@ def materialize_symlinks(model_dir: Path) -> int:
     except OSError:
         return 0
     for link in entries:
+        tmp: Path | None = None
         try:
             target = link.resolve(strict=True)
             if not target.is_file():
                 continue
-            tmp = link.with_name(link.name + ".copying")
+            # Unique per process and per call: two runs loading the model at
+            # the same time must not write into one temp file.
+            tmp = link.with_name(
+                f"{link.name}{TEMP_COPY_MARK}{os.getpid()}-{uuid.uuid4().hex[:8]}"
+            )
             shutil.copyfile(target, tmp)
             os.replace(tmp, link)
+            tmp = None
             done += 1
         except OSError as e:
+            if tmp is not None:
+                # A failed copy (a full disk) must not leave a partial file.
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
             logger.warning(
                 f"could not copy {link.name} into the workspace ({type(e).__name__}); it "
                 "stays a link into the Hugging Face cache, so keep that cache"

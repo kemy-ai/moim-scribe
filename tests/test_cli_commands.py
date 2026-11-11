@@ -394,11 +394,12 @@ def test_doctor_first_line_warns_about_the_slow_import(ws, capsys, clean_env):
 
 @pytest.mark.parametrize("body, audio, transcript", [
     ("stt_backend: faster\nsummarizer: claude_cli\n",
-     "audio: stays on this machine", "transcript: sent to Anthropic (claude_cli)"),
+     "audio: stays on this machine",
+     "transcript: made on this machine, then sent to Anthropic for the summary (claude_cli)"),
     ("stt_backend: soniox\nsummarizer: anthropic_api\n",
-     "audio: UPLOADED to Soniox", "transcript: sent to Anthropic (anthropic_api)"),
+     "audio: UPLOADED to Soniox", "then sent to Anthropic for the summary (anthropic_api)"),
     ("stt_backend: faster\nsummarizer: none\n",
-     "audio: stays on this machine", "transcript: stays on this machine"),
+     "audio: stays on this machine", "transcript: stays on this machine (summarizer: none)"),
     ("stt_backend: faster\nsummarizer: ollama\n",
      "audio: stays on this machine", "transcript: stays on this machine (ollama)"),
 ])
@@ -411,7 +412,7 @@ def test_doctor_states_the_data_flow(ws, capsys, clean_env, body, audio, transcr
 def test_doctor_names_a_remote_ollama(ws, capsys, clean_env, monkeypatch):
     monkeypatch.setenv("OLLAMA_HOST", "gpu-box:11434")
     _, out = _doctor(ws, capsys, body="summarizer: ollama\n")
-    assert "transcript: sent to the Ollama server at gpu-box:11434" in out
+    assert "then sent to the Ollama server at gpu-box:11434" in out
 
 
 def test_doctor_requirements_are_the_preflight_list(ws, capsys, clean_env, real_preflight):
