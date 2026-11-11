@@ -144,6 +144,8 @@ class TestEnrollTagging:
         from moim_scribe import cli
         from moim_scribe.speakers.db import SpeakerDB
 
+        # Every command except init refuses a workspace without config.yaml.
+        (tmp_path / "config.yaml").touch()
         cfg = cli._cfg(str(tmp_path))
         db = SpeakerDB(cfg.speakers_dir)
         if preexisting:
@@ -197,6 +199,8 @@ class TestEnrollTagging:
         from moim_scribe import cli
         from moim_scribe.speakers.db import SpeakerDB
 
+        # Every command except init refuses a workspace without config.yaml.
+        (tmp_path / "config.yaml").touch()
         cfg = cli._cfg(str(tmp_path))
         db = SpeakerDB(cfg.speakers_dir)
         db.save_index({"Ari": {"total_sec": 100, "n_samples": 1}})

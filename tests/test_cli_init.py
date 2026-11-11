@@ -76,16 +76,17 @@ def test_init_adds_a_newline_before_appending_when_needed(tmp_path):
 
 def test_init_leaves_a_complete_gitignore_untouched(tmp_path):
     gi = tmp_path / ".gitignore"
-    original = "speakers/\n.hf_token\n.soniox_key\n"
+    original = "# mine\n" + "".join(f"{n}\n" for n in cli.GITIGNORE_ENTRIES)
     gi.write_text(original, encoding="utf-8")
     _init(tmp_path)
     assert gi.read_text(encoding="utf-8") == original
 
 
-def test_init_refuses_to_overwrite_config_without_force(tmp_path):
+def test_init_never_overwrites_an_existing_config(tmp_path):
+    """Re-running init repairs the workspace and leaves config.yaml alone."""
     _init(tmp_path)
     (tmp_path / "config.yaml").write_text("language: xx\n", encoding="utf-8")
-    assert _init(tmp_path) == 1
+    assert _init(tmp_path) == 0
     assert load_config(tmp_path).language == "xx"
 
 
