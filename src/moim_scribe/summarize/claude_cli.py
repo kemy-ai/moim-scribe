@@ -12,6 +12,10 @@ it is started with everything else switched off (ISOLATION_FLAGS):
   - none of the user's own customizations (global instructions, hooks, MCP
     servers, skills, settings). Otherwise the summary depends on the machine
     it ran on.
+  - no session kept on disk (`--no-session-persistence`). Without it the CLI
+    saves every prompt in its own session store, outside the workspace: the
+    transcript, the recording title, the speaker stats and any matching
+    pack's roster would then live on in a second place the user never chose.
 
 Safe mode alone does not cover settings. Measured on a machine whose user
 settings ask for Korean replies: with safe mode only, an English lens and an
@@ -35,7 +39,10 @@ import tempfile
 
 logger = logging.getLogger("moim_scribe.summarize.claude_cli")
 
-ISOLATION_FLAGS = ("--safe-mode", "--strict-mcp-config", "--tools=", "--setting-sources", "project")
+ISOLATION_FLAGS = (
+    "--safe-mode", "--strict-mcp-config", "--tools=", "--setting-sources", "project",
+    "--no-session-persistence",
+)
 
 
 class ClaudeCliSummarizer:
@@ -57,7 +64,8 @@ class ClaudeCliSummarizer:
             raise RuntimeError(
                 "this claude CLI does not accept the isolation flags "
                 f"({' '.join(ISOLATION_FLAGS)}), and running without them would "
-                "give the summary step tools and your own Claude Code settings. "
+                "give the summary step tools and your own Claude Code settings, and "
+                "save the transcript in the CLI's session store. "
                 "Update Claude Code, or set summarizer to ollama / none in config.yaml"
             )
         if r.returncode != 0:

@@ -35,7 +35,27 @@ def test_the_cli_is_started_without_tools_or_customizations(monkeypatch):
         assert flag in argv
     assert ISOLATION_FLAGS == (
         "--safe-mode", "--strict-mcp-config", "--tools=", "--setting-sources", "project",
+        "--no-session-persistence",
     )
+
+
+def test_no_session_is_kept_on_disk(monkeypatch):
+    """Without --no-session-persistence the CLI saves the prompt (transcript,
+    title, speaker stats, pack roster) in its session store, outside the
+    workspace."""
+    calls = _fake_run(monkeypatch, [(0, "# Summary\n", "")])
+    ClaudeCliSummarizer("sonnet", executable="/bin/claude").summarize("transcript")
+    assert "--no-session-persistence" in calls[0]
+
+
+def test_an_older_cli_without_the_session_flag_fails_closed(monkeypatch):
+    calls = _fake_run(monkeypatch, [
+        (1, "", "error: unknown option '--no-session-persistence'"),
+        (0, "# Summary\n", ""),
+    ])
+    with pytest.raises(RuntimeError, match="Update Claude Code"):
+        ClaudeCliSummarizer("sonnet", executable="/bin/claude").summarize("t")
+    assert len(calls) == 1
 
 
 def test_user_settings_are_excluded_and_the_call_runs_from_an_empty_directory(monkeypatch, tmp_path):
