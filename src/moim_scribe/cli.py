@@ -324,6 +324,13 @@ def cmd_process(args) -> int:
             # above should have caught it; if not, report it the same way.
             _err(f"setup problem: {e}")
             return 1
+        except Exception as e:  # noqa: BLE001 - a one-off command should end in one line, not a traceback
+            # What was already written is kept: the transcript lands in results/
+            # before the summary is attempted, so a summarizer failure here does
+            # not cost the transcription.
+            _err(f"failed: {type(e).__name__}: {e}")
+            _err("your original file was not touched; if a transcript was produced it is in results/")
+            return 1
         print(f"result: {out}")
         return 0
     finally:
@@ -468,7 +475,7 @@ def _online_hf_access(token: str | None, mark) -> None:
             auth_check(repo, token=token)
         except Exception as e:  # noqa: BLE001
             if type(e).__name__ == "GatedRepoError":
-                mark("FAIL", f"{repo}: this token has no access yet. Open "
+                mark("FAIL", f"{repo}: this token has no access (terms not accepted yet, or the token itself is wrong). Open "
                      f'https://huggingface.co/{repo} and click "Agree and access repository"')
             else:
                 mark("?", f"could not check {repo}: {type(e).__name__}")

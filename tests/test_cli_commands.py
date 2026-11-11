@@ -130,8 +130,8 @@ def test_a_failed_process_leaves_no_temp_dir_or_wav(ws, tmp_path, monkeypatch):
     src = tmp_path / "rec.m4a"
     src.write_bytes(b"x" * 100)
 
-    with pytest.raises(RuntimeError):
-        cli.main(["process", str(src), "--workspace", str(ws)])
+    # An ordinary failure ends in exit 1 and one line, not a traceback.
+    assert cli.main(["process", str(src), "--workspace", str(ws)]) == 1
 
     assert not seen[0].exists()
     assert not list(ws.glob(".process-*"))
@@ -517,3 +517,24 @@ def test_doctor_online_without_the_hub_package_is_not_a_failure(ws, capsys, clea
     for repo in GATED_HF_REPOS:
         assert f"could not check {repo}: ModuleNotFoundError" in out
     assert rc == 0
+
+
+def test_process_reports_an_ordinary_failure_in_one_line(tmp_path, monkeypatch, capsys):
+    """A summarizer or engine failure in `process` used to end in a traceback.
+    It must end in one line, exit 1, the original untouched and no temp dir."""
+    ws = tmp_path / "ws"
+    assert cli.main(["init", str(ws), "--language", "en"]) == 0
+    src = tmp_path / "rec.m4a"
+    src.write_bytes(b"x" * 100)
+
+    def boom(cfg, claimed, **kw):
+        raise RuntimeError("summarization failed (transcript kept at results/x.txt): rate limited")
+
+    monkeypatch.setattr("moim_scribe.pipeline.process_recording", boom)
+    capsys.readouterr()
+    assert cli.main(["process", str(src), "--workspace", str(ws)]) == 1
+    err = capsys.readouterr().err
+    assert "failed: RuntimeError: summarization failed" in err
+    assert "Traceback" not in err
+    assert src.read_bytes() == b"x" * 100
+    assert not list(ws.glob(".process-*"))
