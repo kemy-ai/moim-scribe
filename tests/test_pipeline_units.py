@@ -1,4 +1,5 @@
 """Pure-logic pieces of the pipeline: filename hints, lock, prompt headers."""
+import os
 import unicodedata
 
 from moim_scribe.pipeline import (
@@ -99,7 +100,9 @@ def test_rec_title_header_carries_the_title_but_warns_against_copying_it():
 def test_lock_basic_cycle(tmp_path):
     lock = PipelineLock(tmp_path)
     assert lock.acquire() is True
-    # second acquire from the same live pid fails (we are alive)
+    # held by another live process (our parent stands in for it): acquire fails.
+    # Our own pid would not do: a lock naming it is stale (see test_pipeline_robustness).
+    (tmp_path / ".moim-scribe.lock" / "pid").write_text(str(os.getppid()))
     assert PipelineLock(tmp_path).acquire() is False
     lock.release()
     assert PipelineLock(tmp_path).acquire() is True

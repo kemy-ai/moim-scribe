@@ -86,7 +86,7 @@ def test_undecodable_file_is_skipped_not_failed(tmp_path, monkeypatch, caplog):
     )
     with caplog.at_level("INFO"):
         assert is_stable_audio(f) is False
-    assert "not decodable yet" in caplog.text
+    assert "still downloading, or not a valid audio file" in caplog.text
 
 
 def test_too_small_file_is_skipped(tmp_path, monkeypatch):
