@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -50,8 +51,46 @@ def get_model(model_dir: Path):
         savedir=str(model_dir),
         run_opts={"device": _device()},
     )
+    materialize_symlinks(model_dir)
     _model_dir = model_dir
     return _model
+
+
+def materialize_symlinks(model_dir: Path) -> int:
+    """Replace symlinks in model_dir with real copies. Returns how many.
+
+    speechbrain "saves" the model into the workspace as symlinks into the
+    Hugging Face cache. The workspace then only looks self-contained: clear
+    the cache (or move the workspace to another machine) and the next run,
+    which is forced offline, fails with nothing to load. Copying is done here
+    rather than through a speechbrain option so that it does not depend on
+    which speechbrain version is installed.
+
+    Never fatal: a link that cannot be copied is left as it is and logged,
+    because the model that was just loaded works either way.
+    """
+    done = 0
+    try:
+        entries = [p for p in Path(model_dir).iterdir() if p.is_symlink()]
+    except OSError:
+        return 0
+    for link in entries:
+        try:
+            target = link.resolve(strict=True)
+            if not target.is_file():
+                continue
+            tmp = link.with_name(link.name + ".copying")
+            shutil.copyfile(target, tmp)
+            os.replace(tmp, link)
+            done += 1
+        except OSError as e:
+            logger.warning(
+                f"could not copy {link.name} into the workspace ({type(e).__name__}); it "
+                "stays a link into the Hugging Face cache, so keep that cache"
+            )
+    if done:
+        logger.info(f"speaker model: {done} file(s) copied into {model_dir} (no longer links into the cache)")
+    return done
 
 
 def load_wav_mono16k(path: str | Path) -> np.ndarray:
