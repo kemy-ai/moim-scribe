@@ -48,7 +48,8 @@ def watch(cfg: Config, interval_sec: float = FALLBACK_INTERVAL_SEC) -> None:
 
     A setup problem (scan_inbox returns "setup_problems") does not stop the
     loop: every pass checks again, so saving the missing token or installing
-    ffmpeg is enough, with no restart.
+    ffmpeg is enough, with no restart. Neither does an exception escaping a
+    pass: it is logged and the next pass runs. Only Ctrl-C stops it.
     """
     reporter = SetupReporter(repeat_every=SETUP_REPEAT_EVERY_PASSES)
     wake = threading.Event()
@@ -60,7 +61,18 @@ def watch(cfg: Config, interval_sec: float = FALLBACK_INTERVAL_SEC) -> None:
     )
     try:
         while True:
-            scan_inbox(cfg, reporter=reporter)
+            try:
+                scan_inbox(cfg, reporter=reporter)
+            except Exception as e:  # one bad pass must not end watching
+                # scan_inbox keeps per-file failures to itself; anything that
+                # still gets out is a bug or an environment problem, and the
+                # next pass may well succeed. KeyboardInterrupt is not an
+                # Exception, so Ctrl-C still stops the loop.
+                logger.error(
+                    f"a pass stopped on an unexpected error, watching continues: "
+                    f"{type(e).__name__}: {e}"
+                )
+                logger.debug("traceback of the failed pass", exc_info=True)
             wake.clear()
             wake.wait(timeout=interval_sec)
     except KeyboardInterrupt:

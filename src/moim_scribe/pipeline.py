@@ -22,13 +22,14 @@ import subprocess
 import sys
 import time
 import unicodedata
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
 from . import preflight as _preflight
 from .config import AUDIO_EXTS, SUMMARY_LENS, Config, normalize_folder_name
 from .diarize import PID as ENGINE_PID
-from .diarize import get_hf_token, run_diarization
+from .diarize import SetupProblem, get_hf_token, run_diarization
 from .packs import build_block, save_card
 from .speaker_stats import render_speaker_stats_block
 from .speakers.db import SpeakerDB
@@ -42,6 +43,7 @@ STABILIZE_WAIT_SEC = 3.0
 PREFETCH_CHUNK_BYTES = 1 << 20
 PREFETCH_SLOW_SEC = 5.0  # above this, say so: the whole pass was held meanwhile
 MIN_ON_DISK_RATIO = 0.95  # see on_disk_ratio(): complete files measure 1.00
+PROBE_TIMEOUT_SEC = 60
 RESULT_SUFFIXES = ("_transcript.txt", "_diarized.jsonl", "_summary.md")
 
 PROMPT_HEADERS = {
@@ -375,10 +377,19 @@ def is_stable_audio(path: Path) -> bool:
                 "if it is not downloading, remove it from inbox/"
             )
             return False
-    probe = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", str(path), "-t", "0.1", "-f", "null", "-"],
-        capture_output=True, timeout=60, check=False,
-    )
+    try:
+        probe = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(path), "-t", "0.1", "-f", "null", "-"],
+            capture_output=True, timeout=PROBE_TIMEOUT_SEC, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        # A stalled cloud read can hold ffmpeg past the timeout. Escaping from
+        # here would end the pass (and `watch`): call it not ready instead.
+        logger.warning(
+            f"SKIP {path.name}: the decode check did not finish ({type(e).__name__}): "
+            "still downloading, or the drive is slow: it is tried again next pass"
+        )
+        return False
     if probe.returncode != 0:
         # No state is kept between passes, so this cannot tell a download that
         # will finish from a file that will never decode. Name both, at a level
@@ -404,6 +415,12 @@ WORK_SUFFIXES = (
 # names in results/ ("YYMMDD_" + title + " (n)" + "_diarized.jsonl") are
 # shorter, and the title is never longer than the stem.
 LONGEST_STEM_SUFFIX = " (99)_transcript_diarized.jsonl"
+# name_fits() creates "<stem><NAME_PROBE_SUFFIX>" for a moment. The suffix is at
+# least as long as LONGEST_STEM_SUFFIX (both ASCII, so in bytes and in UTF-16
+# units alike) and ends in an extension nothing else uses, so a probe orphaned
+# by a crash between create and unlink is recognised and removed later.
+NAME_PROBE_EXT = ".moim-probe"
+NAME_PROBE_SUFFIX = f" (99)_name_fits_probe{NAME_PROBE_EXT}"
 
 # Temporary files the engine (diarize.py) creates in the claimed file's folder,
 # named after the engine process id. The full-length wav is as large as the
@@ -464,7 +481,7 @@ def name_fits(folder: Path, stem: str) -> bool:
     2 or 3 of them), while ext4 allows 255 bytes. Only "name too long" answers
     no; any other error lets the run go ahead, since its cleanup is now safe.
     """
-    probe = folder / f"{stem}{LONGEST_STEM_SUFFIX}"
+    probe = folder / f"{stem}{NAME_PROBE_SUFFIX}"
     try:
         fd = os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
@@ -510,6 +527,20 @@ def _is_stale_engine_temp(name: str) -> bool | None:
     return pid == os.getpid() or not PipelineLock._pid_alive(pid)
 
 
+def _is_name_probe(path: Path) -> bool:
+    """An empty file name_fits() created and a crash kept it from deleting.
+
+    Empty as well as named so: a recording is never 0 bytes, so even one a
+    user happened to give this extension is never taken for a probe.
+    """
+    if not path.name.endswith(NAME_PROBE_EXT):
+        return False
+    try:
+        return path.is_file() and path.stat().st_size == 0
+    except OSError:
+        return False
+
+
 def quarantine_leftovers(cfg: Config) -> None:
     """Move files stranded in _processing (a previous crash) to _error.
 
@@ -529,6 +560,10 @@ def quarantine_leftovers(cfg: Config) -> None:
         logger.error(f"cannot list {cfg.processing_dir}: {type(e).__name__}: {e}")
         return
     for f in entries:
+        if _is_name_probe(f):
+            _safe_unlink(f)
+            logger.info(f"removed a name check file left by an earlier run: {f.name}")
+            continue
         stale_temp = _is_stale_engine_temp(f.name)
         if stale_temp is not None:
             if stale_temp:
@@ -568,15 +603,60 @@ def free_result_base(results_dir: Path, base: str) -> str:
     return candidate
 
 
-def process_recording(cfg: Config, claimed: Path, *, summarize: bool = True) -> Path:
+def claim_result_base(results_dir: Path, base: str) -> str:
+    """Like free_result_base, but the name is taken atomically before returning.
+
+    Checking first and writing later lets a `process` run and the watcher,
+    finishing the same title on the same day, pick the same name, and one
+    copy then overwrites the other's jsonl. The transcript file is created
+    here with O_EXCL, so of two runs only one can get a given base; the other
+    gets FileExistsError and moves on to the next number. The caller writes
+    the transcript through this (empty) file and removes it if that fails.
+    """
+    candidate, n = base, 2
+    while True:
+        if not any(_exists(results_dir / f"{candidate}{sfx}") for sfx in RESULT_SUFFIXES[1:]):
+            try:
+                fd = os.open(results_dir / f"{candidate}{RESULT_SUFFIXES[0]}",
+                             os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+            except FileExistsError:
+                pass
+            else:
+                os.close(fd)
+                return candidate
+        candidate = f"{base} ({n})"
+        n += 1
+
+
+@dataclass
+class RunProgress:
+    """What one process_recording call has put in results/, for its caller.
+
+    scan_inbox decides from this whether a recording that stopped can go back
+    to inbox/: once its transcript is in results/, putting it back would have
+    every later pass transcribe it again (a new paid upload on Soniox) and add
+    " (2)", " (3)", ... results.
+    """
+
+    # Every file this run created in results/, a partly written one included.
+    created: list[Path] = field(default_factory=list)
+    # True once the transcript is complete in results/.
+    results_written: bool = False
+
+
+def process_recording(
+    cfg: Config, claimed: Path, *, summarize: bool = True, progress: RunProgress | None = None
+) -> Path:
     """Run one claimed file end-to-end. Returns the primary result path.
 
     Every recording takes the same route: diarize, name the speakers from the
     fingerprint database, summarize with the one summary lens. What kind of
     recording it is (a meeting, a call, a book club) is not asked.
 
-    Raises on failure — the caller decides quarantine/cleanup.
+    Raises on failure; the caller decides quarantine/cleanup. When `progress`
+    is given, it is kept up to date with what has been written to results/.
     """
+    progress = progress if progress is not None else RunProgress()
     hint, title = filename_speaker_hint(claimed.stem, cfg.language)
     # The user's local date, timezone-explicit — result filenames must match
     # the day the user experienced, not the UTC day.
@@ -632,16 +712,25 @@ def process_recording(cfg: Config, claimed: Path, *, summarize: bool = True) -> 
         raise RuntimeError("empty transcript")
 
     cfg.results_dir.mkdir(parents=True, exist_ok=True)
-    base = free_result_base(cfg.results_dir, f"{date_tag}_{title}")
+    base = claim_result_base(cfg.results_dir, f"{date_tag}_{title}")
     if base != f"{date_tag}_{title}":
         logger.info(f"results/ already has {date_tag}_{title}; writing this one as {base}")
     out_txt = cfg.results_dir / f"{base}_transcript.txt"
-    shutil.copy2(transcript_path, out_txt)
-    # Keep the segment records too — they are the raw material for
+    progress.created.append(out_txt)
+    try:
+        shutil.copy2(transcript_path, out_txt)
+    except BaseException:
+        # The claimed name must not stay behind as an empty file.
+        _safe_unlink(out_txt)
+        raise
+    progress.results_written = True
+    # Keep the segment records too: they are the raw material for
     # `moim-scribe enroll` (mapping SPEAKER_NN ranges to names later).
     jsonl_src = Path(result["jsonl_path"])
     if jsonl_src.exists():
-        shutil.copy2(jsonl_src, cfg.results_dir / f"{base}_diarized.jsonl")
+        out_jsonl = cfg.results_dir / f"{base}_diarized.jsonl"
+        progress.created.append(out_jsonl)
+        shutil.copy2(jsonl_src, out_jsonl)
 
     stats_path = Path(result["stats_path"])
 
@@ -705,6 +794,7 @@ def process_recording(cfg: Config, claimed: Path, *, summarize: bool = True) -> 
     )
 
     out_md = cfg.results_dir / f"{base}_summary.md"
+    progress.created.append(out_md)
     try:
         summary = summarizer.summarize(prompt)
     except Exception as e:
@@ -886,7 +976,8 @@ class SetupReporter:
         self._last: tuple[str, ...] = ()
         self._since = 0
 
-    def report(self, problems: list[str]) -> None:
+    def report(self, problems: list[str], *, untouched: bool = True) -> None:
+        """Log the problems; `untouched` says no recording was claimed or moved."""
         current = tuple(problems)
         if not current:
             if self._last:
@@ -898,8 +989,9 @@ class SetupReporter:
             if self._since < self.repeat_every:
                 return
         self._last, self._since = current, 0
+        prefix = "setup problem, no recording was touched" if untouched else "setup problem"
         for p in current:
-            logger.error(f"setup problem, no recording was touched: {p}")
+            logger.error(f"{prefix}: {p}")
 
 
 def _put_back(claimed: Path, folder: Path) -> Path | None:
@@ -916,12 +1008,112 @@ def _put_back(claimed: Path, folder: Path) -> Path | None:
     return dest if _safe_move(claimed, dest) else None
 
 
+def _undo_run(cfg: Config, work_products: list[Path], progress: RunProgress) -> None:
+    """Delete what one run made: work products, engine temp files, results."""
+    for wp in work_products:
+        _safe_unlink(wp)
+    remove_engine_temp_files(cfg.processing_dir, ENGINE_PID)
+    for out in progress.created:
+        if _exists(out):
+            _safe_unlink(out)
+            logger.info(f"removed this run's {out.name} from results/")
+
+
+def _file_failure(cfg: Config, claimed: Path, stem: str, work_products: list[Path],
+                  reason: str) -> None:
+    """Move a recording that failed, and its transcript if any, to _error.
+
+    Every step is OSError-safe: a cleanup that raises would end this pass and,
+    the file still being in _processing, the quarantine of every later pass.
+    """
+    logger.error(f"FAILED -> _error: {claimed.name}: {reason}")
+    dest = archive_stem(cfg.error_dir, stem, claimed.suffix)
+    _safe_move(claimed, cfg.error_dir / f"{dest}{claimed.suffix}")
+    for wp in work_products:
+        if wp.name.endswith("_transcript_diarized.txt") and _exists(wp):
+            _safe_move(wp, cfg.error_dir / f"{dest}{wp.name[len(stem):]}")
+        else:
+            _safe_unlink(wp)
+    remove_engine_temp_files(cfg.processing_dir, ENGINE_PID)
+
+
+def _put_back_or_park(cfg: Config, claimed: Path, folder: Path) -> str:
+    """Return a setup-stopped recording to its folder; say truthfully where it is.
+
+    If its folder is gone (or refuses the move), leaving it in _processing
+    would have the next pass quarantine it as if a run had crashed on it. It
+    goes to _error now instead, with the reason, and never comes back by
+    itself, so the message says how to retry.
+    """
+    back = _put_back(claimed, folder)
+    if back is not None:
+        return (f"{claimed.name} was put back where it was, as {back}, and is processed "
+                "once the problem is fixed")
+    dest = archive_stem(cfg.error_dir, claimed.stem, claimed.suffix)
+    parked = cfg.error_dir / f"{dest}{claimed.suffix}"
+    if _safe_move(claimed, parked):
+        return (f"{claimed.name} could not be put back into {folder}, so it is in {parked}: "
+                "it is not processed again by itself, move it back to inbox/ once the "
+                "problem is fixed")
+    return (f"{claimed.name} could not be put back into {folder} and is still at {claimed}: "
+            "the next pass moves it to _error/; move it back to inbox/ once the problem "
+            "is fixed")
+
+
+def _archive_done(cfg: Config, claimed: Path, stem: str, work_products: list[Path],
+                  progress: RunProgress) -> None:
+    """File a processed recording and its sidecars in _done.
+
+    Which file feeds which tool matters here: `enroll` needs the *jsonl*
+    (segment start/end exist nowhere else) and process_recording has already
+    copied it into results/; `verify` and manual label fixes read the txt. So
+    deleting work_products[0] is safe only because of that copy: if it ever
+    stops happening, the recording becomes permanently un-enrollable. Keep the
+    two in sync.
+
+    A _done that cannot be written must not end the pass: the recording would
+    stay in _processing and the next pass would quarantine it as if a run had
+    crashed on it. The least bad place is then _error, said for what it is:
+    the recording WAS processed and needs no retry. _error is never picked up
+    by itself, so nothing is transcribed twice, and the user sees it there.
+    """
+    results = ", ".join(str(p) for p in progress.created if _exists(p)) or str(cfg.results_dir)
+    _safe_unlink(work_products[0])
+    # A recurring name must not replace last session's original (see archive_stem).
+    dest = archive_stem(cfg.done_dir, stem, claimed.suffix)
+    if _safe_move(claimed, cfg.done_dir / f"{dest}{claimed.suffix}"):
+        for wp in work_products[1:]:
+            if _exists(wp):
+                _safe_move(wp, cfg.done_dir / f"{dest}{wp.name[len(stem):]}")
+        if dest != stem:
+            logger.info(f"_done already had {claimed.name}; kept both, this one "
+                        f"as {dest}{claimed.suffix}")
+        logger.info(f"done: {claimed.name}")
+        return
+    err_dest = archive_stem(cfg.error_dir, stem, claimed.suffix)
+    parked = cfg.error_dir / f"{err_dest}{claimed.suffix}"
+    if _safe_move(claimed, parked):
+        for wp in work_products[1:]:
+            if _exists(wp):
+                _safe_move(wp, cfg.error_dir / f"{err_dest}{wp.name[len(stem):]}")
+        where = f"it is in {parked} only because _done could not be written"
+    else:
+        where = (f"it is still at {claimed} and the next pass moves it to _error/ as if a "
+                 "run had stopped on it")
+    logger.error(
+        f"{claimed.name} WAS processed (results: {results}), but could not be archived "
+        f"to {cfg.done_dir}: {where}. It needs no retry: do not move it back to inbox/ "
+        "unless you want it transcribed again"
+    )
+
+
 def scan_inbox(cfg: Config, *, reporter: SetupReporter | None = None) -> dict:
     """One inbox pass: preflight, stabilize, claim, process, and file the outcome.
 
     Returns {"processed": n, "failed": n, "skipped": n}. When the pass stopped
     on a setup problem (the lock could not be created, the preflight failed,
-    or processing raised SystemExit) the dict also carries "setup_problems", a
+    or processing raised SystemExit or SetupProblem before the transcript was
+    written) the dict also carries "setup_problems", a
     non-empty list of messages. The key is absent otherwise, so a normal
     result compares equal to the three counts. Callers should treat a present
     "setup_problems" like a failure (`scan-inbox` exits non-zero).
@@ -1000,61 +1192,50 @@ def scan_inbox(cfg: Config, *, reporter: SetupReporter | None = None) -> dict:
                     continue
 
                 work_products = [cfg.processing_dir / f"{stem}{sfx}" for sfx in WORK_SUFFIXES]
+                progress = RunProgress()
                 try:
-                    process_recording(cfg, claimed, summarize=not _is_transcript_only(cfg, folder))
-                except SystemExit as e:
+                    process_recording(cfg, claimed, summarize=not _is_transcript_only(cfg, folder),
+                                      progress=progress)
+                except KeyboardInterrupt:
+                    # The user stopped `watch` (or a one-off scan) mid-recording.
+                    # Leave things as they were before this file was claimed:
+                    # this run's files gone, the recording back in its folder.
+                    _undo_run(cfg, work_products, progress)
+                    back = _put_back(claimed, folder)
+                    if back is not None:
+                        logger.warning(f"interrupted: {claimed.name} was put back as {back}")
+                    else:
+                        logger.error(
+                            f"interrupted: {claimed.name} could not be put back and is still in "
+                            f"{cfg.processing_dir}: move it back to {folder} yourself"
+                        )
+                    raise
+                except (SystemExit, SetupProblem) as e:
+                    if progress.results_written:
+                        # Too late to undo: the transcript is in results/, and a
+                        # recording put back now would be transcribed again on
+                        # every pass. File it as an ordinary failure.
+                        _file_failure(cfg, claimed, stem, work_products,
+                                      f"setup problem after the transcript was written ({e})")
+                        counts["failed"] += 1
+                        continue
                     # A setup problem the preflight did not foresee. It is not
                     # this recording's fault, so it must not go to _error, and
                     # SystemExit must not escape: it would end `watch`. Undo the
                     # claim, drop this run's leftovers, stop the pass.
-                    for wp in work_products:
-                        _safe_unlink(wp)
-                    remove_engine_temp_files(cfg.processing_dir, ENGINE_PID)
-                    back = _put_back(claimed, folder)
-                    where = (f"put back as {back}" if back is not None
-                             else f"could NOT be put back, it is still at {claimed}")
+                    _undo_run(cfg, work_products, progress)
                     problem = (
-                        f"processing stopped on a setup problem ({e}): fix it and the "
-                        f"recording is picked up again; {claimed.name} was {where}"
+                        f"processing stopped on a setup problem ({e}): "
+                        f"{_put_back_or_park(cfg, claimed, folder)}"
                     )
-                    reporter.report([problem])
+                    reporter.report([problem], untouched=False)
                     return {**counts, "setup_problems": [problem]}
-                except Exception as e:  # noqa: BLE001 — one bad file must not stop the pass
-                    logger.error(f"FAILED -> _error: {claimed.name} — {e}")
-                    # Every step below is OSError-safe: a cleanup that raises
-                    # would end this pass and, the file still being in
-                    # _processing, the quarantine of every later pass.
-                    dest = archive_stem(cfg.error_dir, stem, claimed.suffix)
-                    _safe_move(claimed, cfg.error_dir / f"{dest}{claimed.suffix}")
-                    for wp in work_products:
-                        if wp.name.endswith("_transcript_diarized.txt") and _exists(wp):
-                            _safe_move(wp, cfg.error_dir / f"{dest}{wp.name[len(stem):]}")
-                        else:
-                            _safe_unlink(wp)
-                    remove_engine_temp_files(cfg.processing_dir, ENGINE_PID)
+                except Exception as e:  # noqa: BLE001 (one bad file must not stop the pass)
+                    _file_failure(cfg, claimed, stem, work_products, str(e))
                     counts["failed"] += 1
                     continue
 
-                # Success: move the txt and speakers.json to _done, drop the
-                # working jsonl. Which file feeds which tool matters here:
-                # `enroll` needs the *jsonl* (segment start/end exist nowhere
-                # else) and process_recording has already copied it into
-                # results/; `verify` and manual label fixes read the txt.
-                # So deleting work_products[0] is safe only because of that
-                # copy — if it ever stops happening, the recording becomes
-                # permanently un-enrollable. Keep the two in sync.
-                work_products[0].unlink(missing_ok=True)
-                # A recurring name must not replace last session's original
-                # (see archive_stem).
-                dest = archive_stem(cfg.done_dir, stem, claimed.suffix)
-                for wp in work_products[1:]:
-                    if wp.exists():
-                        shutil.move(str(wp), cfg.done_dir / f"{dest}{wp.name[len(stem):]}")
-                shutil.move(str(claimed), cfg.done_dir / f"{dest}{claimed.suffix}")
-                if dest != stem:
-                    logger.info(f"_done already had {claimed.name}; kept both, this one "
-                                f"as {dest}{claimed.suffix}")
-                logger.info(f"done: {claimed.name}")
+                _archive_done(cfg, claimed, stem, work_products, progress)
                 counts["processed"] += 1
         return counts
     finally:

@@ -322,7 +322,7 @@ def test_a_types_block_scans_exactly_the_folders_it_names(tmp_path, monkeypatch,
     calls = {}
     monkeypatch.setattr(pipeline, "is_stable_audio", lambda p: True)
     monkeypatch.setattr(pipeline, "process_recording",
-                        lambda cfg_, claimed, **kw: calls.__setitem__(claimed.name, kw) or claimed)
+                        lambda cfg_, claimed, progress=None, **kw: calls.__setitem__(claimed.name, kw) or claimed)
     for sub, name in (("meeting", "m.m4a"), ("gathering", "g.m4a"), ("transcript", "t.m4a"),
                       ("private", "p.m4a"), (nfd, "n.m4a"), ("hold-for-later", "h.m4a"),
                       (".", "stray in root.m4a"), ("hold-for-later", "h2.m4a")):
@@ -351,7 +351,7 @@ def test_no_types_block_means_root_and_subfolders_and_no_warning(tmp_path, monke
     monkeypatch.setattr(pipeline, "is_stable_audio", lambda p: True)
     seen = []
     monkeypatch.setattr(pipeline, "process_recording",
-                        lambda cfg_, claimed, **kw: seen.append((claimed.name, kw)) or claimed)
+                        lambda cfg_, claimed, progress=None, **kw: seen.append((claimed.name, kw)) or claimed)
     _drop(cfg.inbox_dir, "r.m4a")
     _drop(cfg.inbox_dir / "transcript", "t.m4a")
     with caplog.at_level(logging.WARNING):

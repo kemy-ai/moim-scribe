@@ -26,7 +26,7 @@ def ws(tmp_path, monkeypatch):
     seen, calls = [], []
     monkeypatch.setattr(
         "moim_scribe.pipeline.process_recording",
-        lambda cfg_, claimed, **kw: seen.append(claimed.name) or calls.append(kw) or claimed,
+        lambda cfg_, claimed, progress=None, **kw: seen.append(claimed.name) or calls.append(kw) or claimed,
     )
     cfg._calls = calls
     return cfg, seen
@@ -371,7 +371,7 @@ def _legacy_ws(tmp_path, monkeypatch):
     calls = {}
     monkeypatch.setattr(
         "moim_scribe.pipeline.process_recording",
-        lambda cfg_, claimed, **kw: calls.__setitem__(claimed.name, kw) or claimed,
+        lambda cfg_, claimed, progress=None, **kw: calls.__setitem__(claimed.name, kw) or claimed,
     )
     return cfg, calls
 
