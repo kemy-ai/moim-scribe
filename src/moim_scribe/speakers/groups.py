@@ -84,7 +84,7 @@ def format_note(off: list[dict]) -> str:
     if not off:
         return ""
     who = ", ".join(f"{o['name']} ({'/'.join(o['groups'])})" for o in off)
-    return (f"identified {len(off)} speaker(s) from another group — {who} "
+    return (f"identified {len(off)} speaker(s) from another group: {who} "
             f"in a '{off[0]['recording_group']}' recording; worth a listen")
 
 

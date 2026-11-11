@@ -381,6 +381,7 @@ def test_run_diarization_removes_its_temp_wav_when_it_raises(tmp_path, monkeypat
         Path(cmd[-1]).write_bytes(b"W" * 1000)
 
     monkeypatch.setattr(diarize.subprocess, "run", fake_ffmpeg)
+    monkeypatch.setattr(diarize, "load_diarization_pipeline", lambda token: object())
     monkeypatch.setattr(diarize, "diarize_turns", lambda *a, **k: [])
 
     def boom(*a, **k):

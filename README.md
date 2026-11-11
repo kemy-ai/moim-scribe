@@ -71,7 +71,7 @@ What that means in practice:
 
 One-shot diarization scripts treat every recording as a room full of strangers. Recurring groups aren't: it's the same six people every other week. moim-scribe exploits that.
 
-- **Accumulating voice fingerprints.** Confirm who's who once, and each speaker's ECAPA embedding is stored and refined (speech-seconds weighted average) every time they appear. `SPEAKER_03` becomes a real name automatically from the second session on.
+- **Accumulating voice fingerprints.** Confirm who's who once, and each speaker's ECAPA embedding is stored and refined (speech-seconds weighted average) every time they appear. From the next session on, `SPEAKER_03` becomes a real name wherever the match is confident (how often that is: "What to expect").
 - **Merge repair.** pyannote's classic failure — two similar voices fused into one cluster — is detected by re-checking segments against enrolled fingerprints, and the transcript is re-labeled. Unenrolled guests are never touched. Relabeling only applies when every anchor shows segment-level evidence of actually being in the recording; otherwise the repair is withheld and the reason is recorded (a wrong name is worse than no name).
 - **Two-voice warning.** After identification, each speaker's long stretches of speech (8 seconds or more, at least five of them) are split two ways. If the smaller part holds 10% or more of the time and the two parts sound different, the log says "two voices suspected" and `speakers.json` marks the label. Labels are never changed by this; it tells you which label to listen to before enrolling it. A label with one second of sound or less that matched nobody is treated as noise: it stays in the transcript but is not counted as an attendee, and the summary is told so.
 - **Anti-hallucination transcription.** Whisper's repetition loops (the same phrase 17 times at exactly 1.0s intervals) are suppressed at decode time and collapsed deterministically afterwards.
@@ -85,7 +85,7 @@ One-shot diarization scripts treat every recording as a room full of strangers. 
 | macOS (Apple Silicon) | `mlx` (mlx-whisper) | tier 1 — this is the config the pipeline was built and field-tested on |
 | Windows / Linux | `faster` (faster-whisper) | supported by design, CI-tested at unit level; field reports welcome |
 | macOS (Intel) | none | not supported: pyannote.audio 4 needs PyTorch 2.8 or newer, and PyTorch publishes no macOS Intel builds after 2.2.2, so the install cannot resolve |
-| any platform | `soniox` (cloud) | no local model, no Hugging Face token — but the audio is uploaded. See below |
+| any supported platform | `soniox` (cloud) | no local model, no Hugging Face token — but the audio is uploaded. See below |
 
 pyannote and speechbrain are PyTorch and run everywhere (CUDA, MPS, CPU). The watcher uses `watchdog` (native events on all three OSes).
 
@@ -206,11 +206,11 @@ moim-scribe enroll "inbox/_done/weekly sync 2p.m4a" "results/YYMMDD_weekly sync_
 
 moim-scribe speakers      # see accumulated fingerprints and their groups
 
-# from the next recording on those people are named automatically; verify a finished transcript anytime (this one reads the .txt):
+# from the next recording on those people are named where the match is confident; verify a finished transcript anytime (this one reads the .txt):
 moim-scribe verify "inbox/_done/weekly sync 2p.m4a" "inbox/_done/weekly sync 2p_transcript_diarized.txt" --expected "Kim Haneul,Lee Bada,Park Gureum"
 ```
 
-Verifying the very recording you enrolled from still shows `SPEAKER_NN` labels: enrollment does not rewrite that transcript, and names appear from the next recording on.
+Verifying the very recording you enrolled from still shows `SPEAKER_NN` labels: enrollment does not rewrite that transcript, and names appear from the next recording on, where the match is confident.
 
 Only enroll ranges a human has confirmed — the discipline that keeps the database trustworthy is in [docs/speaker-verification.md](docs/speaker-verification.md).
 

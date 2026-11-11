@@ -481,6 +481,7 @@ def test_the_spoken_cue_line_points_at_the_file_name(language, example, tmp_path
     monkeypatch.setattr(diarize.subprocess, "run", fake_ffmpeg)
     monkeypatch.setattr(diarize, "transcribe_segments", transcribe)
     monkeypatch.setattr(diarize, "detect_num_speakers", lambda *a, **k: 3)
+    monkeypatch.setattr(diarize, "load_diarization_pipeline", lambda token: object())
     monkeypatch.setattr(diarize, "diarize_turns", lambda *a, **k: [])
     with caplog.at_level(logging.INFO), pytest.raises(RuntimeError):
         diarize.run_diarization(str(rec), stt_backend=object(), language=language,
@@ -529,3 +530,58 @@ def test_a_speaker_index_of_the_wrong_shape_says_what_it_is(body, said, tmp_path
     assert said in problems[0]
     if said != "is not valid JSON":
         assert "not valid JSON" not in problems[0]
+
+
+def test_a_refused_token_is_found_before_anything_is_transcribed(tmp_path, monkeypatch):
+    """Found in review: the pipeline was loaded in the worker thread, so a
+    refused token only surfaced after whisper had transcribed the whole
+    recording. The recording was put back, and `watch` transcribed it again
+    on every pass. The model access is now checked first."""
+    rec = tmp_path / "rec.m4a"
+    rec.write_bytes(b"x" * 100)
+
+    def fake_ffmpeg(cmd, check):
+        Path(cmd[-1]).write_bytes(b"W" * 1000)
+
+    transcribed = []
+    monkeypatch.setattr(diarize.subprocess, "run", fake_ffmpeg)
+    monkeypatch.setattr(diarize, "transcribe_segments",
+                        lambda *a, **k: transcribed.append(a) or [])
+    monkeypatch.setattr(diarize, "detect_num_speakers", lambda *a, **k: None)
+
+    def refused(token):
+        raise diarize.SetupProblem("the Hub refused this token")
+
+    monkeypatch.setattr(diarize, "load_diarization_pipeline", refused)
+    for kwargs in ({"num_speakers": 2}, {}):           # with a count, and with the head clip path
+        with pytest.raises(diarize.SetupProblem):
+            diarize.run_diarization(str(rec), stt_backend=object(), language="en",
+                                    speaker_db=None, model_dir=tmp_path, hf_token="t", **kwargs)
+    assert transcribed == []                            # neither the head clip nor the recording
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["rec.m4a"]   # and no temp wav left
+
+
+def test_the_loaded_pipeline_is_the_one_that_runs(tmp_path, monkeypatch):
+    rec = tmp_path / "rec.m4a"
+    rec.write_bytes(b"x" * 100)
+
+    def fake_ffmpeg(cmd, check):
+        Path(cmd[-1]).write_bytes(b"W" * 1000)
+
+    sentinel = object()
+    loads, used = [], []
+    monkeypatch.setattr(diarize.subprocess, "run", fake_ffmpeg)
+    monkeypatch.setattr(diarize, "transcribe_segments", lambda *a, **k: [])
+    monkeypatch.setattr(diarize, "load_diarization_pipeline",
+                        lambda token: loads.append(token) or sentinel)
+
+    def turns(audio, token, num_speakers=None, pipe=None):
+        used.append(pipe)
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(diarize, "diarize_turns", turns)
+    with pytest.raises(RuntimeError, match="stop here"):
+        diarize.run_diarization(str(rec), stt_backend=object(), language="en",
+                                speaker_db=None, model_dir=tmp_path, hf_token="t", num_speakers=2)
+    assert loads == ["t"] and used == [sentinel]        # loaded once, and reused
+

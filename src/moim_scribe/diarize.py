@@ -177,7 +177,8 @@ _HUB_OFFLINE_ERROR = "LocalEntryNotFoundError"
 MODEL_ACCESS_FIX = (
     "the Hugging Face token cannot download the pyannote models: run "
     "`moim-scribe doctor --online` to see which model page still needs \"Agree and "
-    "access repository\" (or whether the token itself is refused), then try again"
+    "access repository\" (or whether the token itself is refused; a proxy that "
+    "blocks huggingface.co gives the same refusal), then try again"
 )
 
 
@@ -396,18 +397,20 @@ def transcribe_segments(
     return cleaned
 
 
-def diarize_turns(audio: str, token: str, num_speakers: int | None) -> list[tuple[float, float, str]]:
-    """Run pyannote speaker diarization. num_speakers=None lets pyannote estimate.
+def load_diarization_pipeline(token: str):
+    """Load the pyannote pipeline, or raise SetupProblem if the Hub refuses the token.
 
-    A fixed speaker count matters for small meetings: auto-estimation tends
-    to over-split 2-person conversations into 3-4 clusters.
+    Separate from diarize_turns so the local path can call it BEFORE any
+    transcription starts. Loaded inside the worker thread, a refused token only
+    surfaced after whisper had finished the whole recording; the recording was
+    then put back, and under `watch` the next pass transcribed it again, and
+    again. Loading first costs a few seconds once the model is cached and makes
+    a refused token cost nothing.
     """
     # pyannote.audio 4.x phones home usage metrics by default. This tool
     # processes private conversations, so telemetry is opt-in: users who want
     # to support pyannote's stats can export PYANNOTE_METRICS_ENABLED=true.
     os.environ.setdefault("PYANNOTE_METRICS_ENABLED", "false")
-    import numpy
-    import soundfile
     import torch
     from pyannote.audio import Pipeline
 
@@ -428,6 +431,25 @@ def diarize_turns(audio: str, token: str, num_speakers: int | None) -> list[tupl
         pipe.to(torch.device("mps"))
     elif torch.cuda.is_available():
         pipe.to(torch.device("cuda"))
+    return pipe
+
+
+def diarize_turns(
+    audio: str, token: str, num_speakers: int | None, pipe=None
+) -> list[tuple[float, float, str]]:
+    """Run pyannote speaker diarization. num_speakers=None lets pyannote estimate.
+
+    A fixed speaker count matters for small meetings: auto-estimation tends
+    to over-split 2-person conversations into 3-4 clusters. `pipe` is a
+    pipeline already loaded with load_diarization_pipeline; without it the
+    pipeline is loaded here.
+    """
+    import numpy
+    import soundfile
+    import torch
+
+    if pipe is None:
+        pipe = load_diarization_pipeline(token)
     # In memory, not as a path: pyannote.audio 4 decodes paths with torchcodec,
     # which needs FFmpeg's shared libraries, and the usual Windows FFmpeg build
     # is static. `audio` is always the 16 kHz mono wav from prepare_audio, so
@@ -1180,6 +1202,9 @@ def run_diarization(
     # The working wav is a full decoded copy of the recording: it must not
     # outlive this call whether the run succeeds or raises.
     try:
+        # Before the head clip and before whisper: see load_diarization_pipeline.
+        pipe = load_diarization_pipeline(hf_token)
+
         initial_prompt = load_initial_prompt(glossary_path) if glossary_path else None
         if initial_prompt:
             logger.info(f"glossary prompt active ({len(initial_prompt)} chars)")
@@ -1237,7 +1262,7 @@ def run_diarization(
 
         def _timed_diarize():
             td = time.time()
-            r = diarize_turns(audio, hf_token, num_speakers=num_spk)
+            r = diarize_turns(audio, hf_token, num_speakers=num_spk, pipe=pipe)
             logger.info(f"  pyannote took {time.time() - td:.0f}s (inside parallel window)")
             return r
 

@@ -26,6 +26,7 @@ from . import __version__
 from . import preflight as _preflight
 from .config import (
     CONFIG_NAME,
+    SONIOX_REGIONS,
     Config,
     ConfigError,
     default_stt_backend,
@@ -617,7 +618,7 @@ def cmd_doctor(args) -> int:
     if cloud:
         check(
             f"soniox_region is one of us/eu/jp (got {cfg.soniox_region!r})",
-            cfg.soniox_region in ("us", "eu", "jp"),
+            cfg.soniox_region in SONIOX_REGIONS,
             "eu and jp also need activation by Soniox before they answer",
         )
 
