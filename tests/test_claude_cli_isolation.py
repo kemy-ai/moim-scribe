@@ -33,7 +33,36 @@ def test_the_cli_is_started_without_tools_or_customizations(monkeypatch):
     assert argv[:4] == ["/bin/claude", "-p", "--model", "sonnet"]
     for flag in ("--safe-mode", "--strict-mcp-config", "--tools="):
         assert flag in argv
-    assert set(ISOLATION_FLAGS) == {"--safe-mode", "--strict-mcp-config", "--tools="}
+    assert ISOLATION_FLAGS == (
+        "--safe-mode", "--strict-mcp-config", "--tools=", "--setting-sources", "project",
+    )
+
+
+def test_user_settings_are_excluded_and_the_call_runs_from_an_empty_directory(monkeypatch, tmp_path):
+    """Safe mode does not cover settings: on a machine whose user settings ask
+    for another language, summaries of an English recording came back in that
+    language. So user settings are excluded by flag, and because "project" is
+    the narrowest source there is, the working directory must be one that
+    holds no project."""
+    import os
+
+    seen = {}
+
+    def run(argv, **kw):
+        seen["argv"] = argv
+        seen["cwd"] = kw.get("cwd")
+        seen["cwd_entries"] = os.listdir(kw["cwd"]) if kw.get("cwd") else None
+        return subprocess.CompletedProcess(argv, 0, "# Summary\n", "")
+
+    monkeypatch.setattr(claude_cli.subprocess, "run", run)
+    (tmp_path / "CLAUDE.md").write_text("reply in French", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    ClaudeCliSummarizer("sonnet", executable="/bin/claude").summarize("transcript")
+    i = seen["argv"].index("--setting-sources")
+    assert seen["argv"][i + 1] == "project"
+    assert seen["cwd"] and os.path.realpath(seen["cwd"]) != os.path.realpath(tmp_path)
+    assert seen["cwd_entries"] == []
+    assert not os.path.exists(seen["cwd"])        # and it is cleaned up afterwards
 
 
 def test_an_older_cli_fails_closed_without_a_retry(monkeypatch):

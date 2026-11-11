@@ -10,9 +10,16 @@ it is started with everything else switched off (ISOLATION_FLAGS):
   - no tools. The prompt is a transcript of whatever was said in the room. An
     agent that can act should never be handed that as its instructions.
   - none of the user's own customizations (global instructions, hooks, MCP
-    servers, skills). Otherwise the summary depends on the machine it ran on:
-    in an end-to-end run, an English workspace came back summarized in Korean
-    because the machine's global instructions asked for Korean.
+    servers, skills, settings). Otherwise the summary depends on the machine
+    it ran on.
+
+Safe mode alone does not cover settings. Measured on a machine whose user
+settings ask for Korean replies: with safe mode only, an English lens and an
+English transcript came back in Korean 3 times out of 3; with user settings
+also excluded (`--setting-sources project`) they came back in English 4 out of
+4, and a Korean lens and transcript still came back in Korean. "project" is the
+narrowest source the CLI offers, so the call also runs from an empty temporary
+directory: there is then no project to take settings from either.
 
 Older CLI versions do not know these flags. That case fails closed: a clear
 error tells the user to update Claude Code or pick another summarizer. There
@@ -24,10 +31,11 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import tempfile
 
 logger = logging.getLogger("moim_scribe.summarize.claude_cli")
 
-ISOLATION_FLAGS = ("--safe-mode", "--strict-mcp-config", "--tools=")
+ISOLATION_FLAGS = ("--safe-mode", "--strict-mcp-config", "--tools=", "--setting-sources", "project")
 
 
 class ClaudeCliSummarizer:
@@ -60,12 +68,16 @@ class ClaudeCliSummarizer:
         return out
 
     def _run(self, argv: list[str], prompt: str) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            argv,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=self.timeout_sec,
-            check=False,
-        )
+        # An empty directory of its own: wherever the user ran moim-scribe from
+        # may hold a .claude/ folder or a CLAUDE.md, and that is "project".
+        with tempfile.TemporaryDirectory(prefix="moim-scribe-claude-") as empty:
+            return subprocess.run(
+                argv,
+                input=prompt,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=self.timeout_sec,
+                check=False,
+                cwd=empty,
+            )
