@@ -157,6 +157,8 @@ If a name repeats ("book club.m4a" every week), nothing is overwritten: the seco
 | `ollama` | Ollama running locally | no — nothing leaves at this step |
 | `none` | nothing | no — stops at the diarized transcript |
 
+With `claude_cli`, the CLI is started with no tools and without your own Claude Code customizations (`--safe-mode --strict-mcp-config --tools=`): the transcript is only ever read as text, and the summary does not depend on how that machine's Claude Code is set up. A CLI too old to know those flags still works, with a warning.
+
 Switch in `config.yaml`. The summary template ships in Korean and English (`--language`) and lives in your workspace at `packs/lenses/summary.<language>.md`; edit it to change what every summary looks like. This table is about the transcript only — whether the *audio* leaves is the separate `stt` choice above.
 
 ## Privacy and consent — read this

@@ -157,6 +157,8 @@ moim-scribe verify inbox/_done/녹음.m4a inbox/_done/녹음_transcript_diarized
 | `ollama` | 로컬 Ollama 실행 | 안 나감 — 이 단계에서 나가는 것 없음 |
 | `none` | 없음 | 안 나감 — 화자분리 전사까지만 |
 
+`claude_cli`는 CLI를 도구 없이, 그리고 내 Claude Code 개인 설정 없이 실행합니다(`--safe-mode --strict-mcp-config --tools=`). 전사본은 글로만 읽히고, 요약이 그 컴퓨터의 Claude Code 설정에 따라 달라지지 않습니다. 이 옵션을 모르는 옛 CLI에서도 경고와 함께 동작합니다.
+
 `config.yaml`에서 교체합니다. 요약 양식은 한국어·영어 둘 다 내장이고, 워크스페이스의 `packs/lenses/summary.<언어>.md`에 있습니다. 이 파일을 고치면 모든 요약의 형식이 바뀝니다. 이 표는 **전사본**에 대한 것이고, **녹음 파일**이 나가는지는 위의 `stt` 선택이 결정합니다.
 
 ## 프라이버시와 동의 — 꼭 읽어주세요
