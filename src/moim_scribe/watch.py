@@ -14,11 +14,15 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from .config import AUDIO_EXTS, Config
-from .pipeline import scan_inbox
+from .pipeline import SetupReporter, scan_inbox
 
 logger = logging.getLogger("moim_scribe.watch")
 
 FALLBACK_INTERVAL_SEC = 60.0
+# While the setup is broken every pass finds the same problems. Say them once,
+# again whenever they change, and otherwise only every this many passes (about
+# an hour at the default interval), so the log stays readable.
+SETUP_REPEAT_EVERY_PASSES = 60
 
 
 class _AudioEventHandler(FileSystemEventHandler):
@@ -40,7 +44,13 @@ class _AudioEventHandler(FileSystemEventHandler):
 
 
 def watch(cfg: Config, interval_sec: float = FALLBACK_INTERVAL_SEC) -> None:
-    """Block forever, scanning on events and every interval_sec as fallback."""
+    """Block forever, scanning on events and every interval_sec as fallback.
+
+    A setup problem (scan_inbox returns "setup_problems") does not stop the
+    loop: every pass checks again, so saving the missing token or installing
+    ffmpeg is enough, with no restart.
+    """
+    reporter = SetupReporter(repeat_every=SETUP_REPEAT_EVERY_PASSES)
     wake = threading.Event()
     observer = Observer()
     observer.schedule(_AudioEventHandler(wake), str(cfg.inbox_dir), recursive=True)
@@ -50,7 +60,7 @@ def watch(cfg: Config, interval_sec: float = FALLBACK_INTERVAL_SEC) -> None:
     )
     try:
         while True:
-            scan_inbox(cfg)
+            scan_inbox(cfg, reporter=reporter)
             wake.clear()
             wake.wait(timeout=interval_sec)
     except KeyboardInterrupt:

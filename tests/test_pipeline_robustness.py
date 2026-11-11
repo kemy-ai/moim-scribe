@@ -281,7 +281,13 @@ def test_unwritable_workspace_is_reported_not_called_a_busy_lock(cfg, monkeypatc
     monkeypatch.setattr(Path, "mkdir", no_mkdir)
     _drop(cfg.inbox_dir, "rec.m4a")
     with caplog.at_level("INFO"):
-        assert scan_inbox(cfg) == {"processed": 0, "failed": 0, "skipped": 0}
+        result = scan_inbox(cfg)
+    # A5: the pass must read as failed (scan-inbox exits non-zero), not as an
+    # empty inbox. The three counts are still there and still zero.
+    assert {k: result[k] for k in ("processed", "failed", "skipped")} == {
+        "processed": 0, "failed": 0, "skipped": 0}
+    assert len(result["setup_problems"]) == 1
+    assert "cannot create the lock" in result["setup_problems"][0]
     assert "another run is active" not in caplog.text
     assert "cannot create the lock" in caplog.text
     assert "Read-only file system" in caplog.text

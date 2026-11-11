@@ -25,7 +25,8 @@ import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .config import AUDIO_EXTS, SUMMARY_LENS, Config
+from . import preflight as _preflight
+from .config import AUDIO_EXTS, SUMMARY_LENS, Config, normalize_folder_name
 from .diarize import PID as ENGINE_PID
 from .diarize import get_hf_token, run_diarization
 from .packs import build_block, save_card
@@ -797,47 +798,164 @@ class PipelineLock:
         shutil.rmtree(self.lock_dir, ignore_errors=True)
 
 
-def inbox_folders(cfg: Config) -> list[Path]:
-    """The folders one pass looks in: inbox/ itself, then its direct subfolders.
+def _candidate_subfolders(cfg: Config) -> list[Path]:
+    """Direct subfolders of inbox/ that may hold input, sorted.
 
-    Subfolders carry no meaning (a recording is processed the same wherever it
-    sits), but they are scanned so that (a) users can keep their own order
-    ("inbox/team/", "inbox/calls/") and (b) workspaces from before 0.2, which
-    sorted recordings into inbox/meeting/ and friends, keep working instead of
-    having files sit there unseen. Names starting with "_" are the pipeline's
-    own (_processing, _done, _error) and names starting with "." are hidden;
-    neither is ever input. Symlinked folders are not followed: one pointing
-    at _done would reprocess the whole archive every pass, and one pointing at
-    someone else's folder would have its files moved out. One level only: a deep tree under inbox/ is more
-    likely an accident (a synced folder dropped in whole) than an instruction.
+    Names starting with "_" are the pipeline's own (_processing, _done, _error)
+    and names starting with "." are hidden; neither is ever input. Symlinked
+    folders are not followed: one pointing at _done would reprocess the whole
+    archive every pass, and one pointing at someone else's folder would have
+    its files moved out.
     """
-    folders = [cfg.inbox_dir]
-    if cfg.inbox_dir.is_dir():
-        folders += sorted(
-            d for d in cfg.inbox_dir.iterdir()
-            if d.is_dir() and not d.is_symlink() and not d.name.startswith(("_", "."))
-        )
+    if not cfg.inbox_dir.is_dir():
+        return []
+    return sorted(
+        d for d in cfg.inbox_dir.iterdir()
+        if d.is_dir() and not d.is_symlink() and not d.name.startswith(("_", "."))
+    )
+
+
+def inbox_folders(cfg: Config) -> list[Path]:
+    """The folders one pass looks in.
+
+    Without a `types:` block in config.yaml (0.2): inbox/ itself, then its
+    direct subfolders. Subfolders carry no meaning (a recording is processed
+    the same wherever it sits); they are scanned so users can keep their own
+    order ("inbox/team/", "inbox/calls/"). One level only: a deep tree under
+    inbox/ is more likely an accident (a synced folder dropped in whole) than
+    an instruction.
+
+    With a `types:` block (a workspace from 0.1): exactly the subfolders the
+    block names, matched with normalize_folder_name (so `Private` matches
+    `private`, and an NFC name matches an NFD folder), and not inbox/ itself.
+    That is what 0.1 scanned, and an upgrade must not start processing (and
+    sending to a summarizer) files the user parked elsewhere.
+    """
+    subfolders = _candidate_subfolders(cfg)
+    if cfg.legacy_type_folders is not None:
+        return [d for d in subfolders if normalize_folder_name(d.name) in cfg.legacy_type_folders]
+    folders = [cfg.inbox_dir, *subfolders] if cfg.inbox_dir.is_dir() else []
     return [d for d in folders if d.is_dir()]
 
 
-def scan_inbox(cfg: Config) -> dict:
-    """One inbox pass: stabilize, claim, process, and file the outcome.
+def _is_transcript_only(cfg: Config, folder: Path) -> bool:
+    """A folder a 0.1 `types:` block mapped to null stays transcript-only."""
+    return (
+        cfg.legacy_type_folders is not None
+        and folder != cfg.inbox_dir
+        and normalize_folder_name(folder.name) in cfg.transcript_only_folders
+    )
 
-    Returns {"processed": n, "failed": n, "skipped": n}.
+
+def _recordings_in(folder: Path) -> int:
+    try:
+        entries = list(folder.iterdir())
+    except OSError:
+        return 0
+    return sum(
+        1 for f in entries
+        if not f.name.startswith(".") and f.is_file() and not _ENGINE_TEMP_NAME.fullmatch(f.name)
+        and classify_audio(f)
+    )
+
+
+def unscanned_recordings(cfg: Config) -> int:
+    """Recordings a `types:` block keeps out of the scan (inbox/ root, unlisted folders).
+
+    0 without a block: then nothing that could be input is left out.
     """
+    if cfg.legacy_type_folders is None or not cfg.inbox_dir.is_dir():
+        return 0
+    scanned = set(inbox_folders(cfg))
+    return _recordings_in(cfg.inbox_dir) + sum(
+        _recordings_in(d) for d in _candidate_subfolders(cfg) if d not in scanned
+    )
+
+
+class SetupReporter:
+    """Logs setup problems, without repeating the same ones every pass.
+
+    scan_inbox makes a fresh one per call by default, so a one-off run always
+    logs. `watch` keeps one for its whole life: an unchanged problem list is
+    logged again only every `repeat_every` passes, a changed one at once, and
+    the moment it clears that is said once too.
+    """
+
+    def __init__(self, repeat_every: int | None = None):
+        self.repeat_every = repeat_every
+        self._last: tuple[str, ...] = ()
+        self._since = 0
+
+    def report(self, problems: list[str]) -> None:
+        current = tuple(problems)
+        if not current:
+            if self._last:
+                logger.info("setup problems resolved: processing resumes")
+            self._last, self._since = (), 0
+            return
+        if current == self._last and self.repeat_every is not None:
+            self._since += 1
+            if self._since < self.repeat_every:
+                return
+        self._last, self._since = current, 0
+        for p in current:
+            logger.error(f"setup problem, no recording was touched: {p}")
+
+
+def _put_back(claimed: Path, folder: Path) -> Path | None:
+    """Move a claimed file back to the folder it was claimed from.
+
+    Never onto a file that has appeared there meanwhile: then the claimed one
+    goes back as "<stem> (2)<ext>" (or the next free number).
+    """
+    stem, n = claimed.stem, 2
+    dest = folder / claimed.name
+    while _exists(dest):
+        dest = folder / f"{stem} ({n}){claimed.suffix}"
+        n += 1
+    return dest if _safe_move(claimed, dest) else None
+
+
+def scan_inbox(cfg: Config, *, reporter: SetupReporter | None = None) -> dict:
+    """One inbox pass: preflight, stabilize, claim, process, and file the outcome.
+
+    Returns {"processed": n, "failed": n, "skipped": n}. When the pass stopped
+    on a setup problem (the lock could not be created, the preflight failed,
+    or processing raised SystemExit) the dict also carries "setup_problems", a
+    non-empty list of messages. The key is absent otherwise, so a normal
+    result compares equal to the three counts. Callers should treat a present
+    "setup_problems" like a failure (`scan-inbox` exits non-zero).
+    """
+    reporter = reporter or SetupReporter()
+    counts = {"processed": 0, "failed": 0, "skipped": 0}
     lock = PipelineLock(cfg.workspace)
     if not lock.acquire():
         if lock.error is not None:
-            logger.error(
+            problem = (
                 f"cannot create the lock {lock.lock_dir}: {type(lock.error).__name__}: "
                 f"{lock.error}: the workspace must be writable; nothing was processed"
             )
-        else:
-            logger.info("another run is active: yielding this pass")
-        return {"processed": 0, "failed": 0, "skipped": 0}
+            reporter.report([problem])
+            return {**counts, "setup_problems": [problem]}
+        logger.info("another run is active: yielding this pass")
+        return counts
     try:
+        # Before anything is claimed or moved, quarantine included: a setup
+        # problem must leave every recording exactly where the user put it.
+        problems = _preflight.preflight(cfg)
+        reporter.report(problems)
+        if problems:
+            return {**counts, "setup_problems": problems}
+
+        left_out = unscanned_recordings(cfg)
+        if left_out:
+            logger.warning(
+                f"{left_out} recording(s) in inbox/ or in folders that the `types:` block of "
+                "config.yaml does not name are not processed: delete the `types:` block from "
+                "config.yaml to use the flat inbox, or move them into a listed folder"
+            )
+
         quarantine_leftovers(cfg)
-        counts = {"processed": 0, "failed": 0, "skipped": 0}
         for folder in inbox_folders(cfg):
             for f in sorted(folder.iterdir()):
                 if not f.is_file() or f.name.startswith(".") or not classify_audio(f):
@@ -883,11 +1001,24 @@ def scan_inbox(cfg: Config) -> dict:
 
                 work_products = [cfg.processing_dir / f"{stem}{sfx}" for sfx in WORK_SUFFIXES]
                 try:
-                    process_recording(
-                        cfg, claimed,
-                        summarize=folder.name not in cfg.transcript_only_folders
-                        or folder == cfg.inbox_dir,
+                    process_recording(cfg, claimed, summarize=not _is_transcript_only(cfg, folder))
+                except SystemExit as e:
+                    # A setup problem the preflight did not foresee. It is not
+                    # this recording's fault, so it must not go to _error, and
+                    # SystemExit must not escape: it would end `watch`. Undo the
+                    # claim, drop this run's leftovers, stop the pass.
+                    for wp in work_products:
+                        _safe_unlink(wp)
+                    remove_engine_temp_files(cfg.processing_dir, ENGINE_PID)
+                    back = _put_back(claimed, folder)
+                    where = (f"put back as {back}" if back is not None
+                             else f"could NOT be put back, it is still at {claimed}")
+                    problem = (
+                        f"processing stopped on a setup problem ({e}): fix it and the "
+                        f"recording is picked up again; {claimed.name} was {where}"
                     )
+                    reporter.report([problem])
+                    return {**counts, "setup_problems": [problem]}
                 except Exception as e:  # noqa: BLE001 — one bad file must not stop the pass
                     logger.error(f"FAILED -> _error: {claimed.name} — {e}")
                     # Every step below is OSError-safe: a cleanup that raises

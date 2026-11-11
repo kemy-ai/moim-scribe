@@ -388,7 +388,10 @@ def test_a_folder_that_was_transcribe_only_stays_that_way(tmp_path, monkeypatch)
     scan_inbox(cfg)
     assert calls["private.m4a"] == {"summarize": False}
     assert calls["team.m4a"] == {"summarize": True}
-    assert calls["root.m4a"] == {"summarize": True}
+    # B5: 0.1 scanned only the folders named in `types:`, so while the block is
+    # there inbox/ root is left alone (the pass warns about it instead).
+    assert "root.m4a" not in calls
+    assert (cfg.inbox_dir / "root.m4a").exists()
 
 
 def test_without_a_types_block_nothing_is_transcript_only(ws):
