@@ -109,6 +109,16 @@ def test_summary_lens_forbids_guessed_attribution():
     assert "SPEAKER_NN" in en and "by guesswork" in en
 
 
+def test_summary_lens_says_which_language_to_write_in():
+    """Found in an end-to-end run: an English workspace got a Korean summary,
+    because the summarizer's own environment preferred Korean and nothing in
+    the lens said otherwise."""
+    ko = (LENSES / f"{SUMMARY_LENS}.ko.md").read_text(encoding="utf-8")
+    en = (LENSES / f"{SUMMARY_LENS}.en.md").read_text(encoding="utf-8")
+    assert "전사본의 언어로 쓴다" in ko
+    assert "in the language the transcript is in" in en
+
+
 def test_round_card_headers_exist_letter_for_letter_in_the_lens():
     """🔴 Round cards are harvested by header. If the lens renames a section and
     packs.SECTION_HEADERS does not follow, every card silently comes out

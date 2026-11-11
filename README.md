@@ -53,6 +53,7 @@ One-shot diarization scripts treat every recording as a room full of strangers. 
 
 - **Accumulating voice fingerprints.** Confirm who's who once, and each speaker's ECAPA embedding is stored and refined (speech-seconds weighted average) every time they appear. `SPEAKER_03` becomes a real name automatically from the second session on.
 - **Merge repair.** pyannote's classic failure — two similar voices fused into one cluster — is detected by re-checking segments against enrolled fingerprints, and the transcript is re-labeled. Unenrolled guests are never touched. Relabeling only applies when every anchor shows segment-level evidence of actually being in the recording; otherwise the repair is withheld and the reason is recorded (a wrong name is worse than no name).
+- **Two-voice warning.** After identification, each speaker's long stretches of speech (8 seconds or more, at least five of them) are split two ways. If the smaller part holds 10% or more of the time and the two parts sound different, the log says "two voices suspected" and `speakers.json` marks the label. Labels are never changed by this; it tells you which label to listen to before enrolling it. A label with one second of sound or less that matched nobody is treated as noise: it stays in the transcript but is not counted as an attendee, and the summary is told so.
 - **Anti-hallucination transcription.** Whisper's repetition loops (the same phrase 17 times at exactly 1.0s intervals) are suppressed at decode time and collapsed deterministically afterwards.
 - **One summary, no sorting.** You never tell it what kind of recording this is. The summary keeps the sections that have something in them (decisions, action items, open items) and drops the rest, so a meeting reads like minutes and a catch-up reads like a catch-up. Optionally, a recurring group's roster and running context ride along in the prompt: [docs/packs.md](docs/packs.md).
 - **Honest labels.** Verification tooling (`moim-scribe verify`) cross-checks finished transcripts against fingerprints and your attendee roster, following rules learned from real mislabeling incidents. See [docs/speaker-verification.md](docs/speaker-verification.md).
@@ -136,6 +137,15 @@ moim-scribe verify inbox/_done/rec.m4a inbox/_done/rec_transcript_diarized.txt \
 
 Only enroll ranges a human has confirmed — the discipline that keeps the database trustworthy is in [docs/speaker-verification.md](docs/speaker-verification.md).
 
+`enroll` refuses two things, because a wrong enrollment does not fail, it makes every later recording slightly more wrong:
+
+- **One name on two labels of the same recording.** Usually a label number copied from a different run. If one person really was split into two labels, add `--allow-duplicate`.
+- **A voice that scores below 0.5 against that person's existing fingerprint.** Add `--force` after listening. 0.5 is not a safety line: the same person can score lower on phone audio or against a thin fingerprint.
+
+The others in the same command are still enrolled, and the command exits with status 1 when anything was refused.
+
+If a name repeats ("book club.m4a" every week), nothing is overwritten: the second one is kept as `book club (2).m4a` in `inbox/_done/`, and its results as `YYMMDD_book club (2)_…` when both land on the same day. Use the name the log printed when you run `enroll` or `verify`.
+
 **Group tags are a hint, not a rule.** A fingerprint is compared against everyone enrolled, so as the database grows a name from another recurring group can win a match. When that happens the run logs a line naming who and from where — and changes nothing else. Blocking on it was measured and rejected: people do join a second group or visit as guests, the score ranges overlap, and a tag nobody remembered to update would silently turn a correct match into an unknown. Untagged speakers, unmatched recordings, and anyone marked `--attends-all` are skipped.
 
 ## Summarizer backends
@@ -161,7 +171,7 @@ Details: [docs/privacy.md](docs/privacy.md).
 
 ## Running it in the background
 
-launchd (macOS), systemd (Linux), and Task Scheduler (Windows) templates: [docs/deployment.md](docs/deployment.md). Cloud-synced folders (iCloud Drive, Google Drive, Dropbox) work as the inbox: before touching a file the pipeline checks that it decodes and, on macOS, that it is physically on disk. A file that is still downloading reports its final size and plays from the start, so those two alone let a partly downloaded recording through.
+launchd (macOS), systemd (Linux), and Task Scheduler (Windows) templates: [docs/deployment.md](docs/deployment.md). Cloud-synced folders (iCloud Drive, Google Drive, Dropbox) work as the inbox: before touching a file the pipeline checks that it decodes and, on macOS, that it is physically on disk or reads back whole. A file that is still downloading reports its final size and plays from the start, so size and a decode probe alone let a partly downloaded recording through.
 
 ## Maintenance
 
@@ -172,7 +182,7 @@ Best-effort: issues and PRs are read, response time is not guaranteed. Forks wel
 0.2 removes recording types. What that means for an existing workspace:
 
 - **Folders.** Recordings no longer have to be sorted into `inbox/meeting/`, `inbox/gathering/` or `inbox/transcript/`. Those folders keep working (direct subfolders of `inbox/` are still scanned), but they no longer change anything.
-- **`types:` in `config.yaml`** is ignored, and a log line says so. If you used a transcribe-only folder, set `summarizer: none` instead; it now applies to the whole workspace.
+- **`types:` in `config.yaml`** no longer selects a lens, and a log line says so. One part of it is still honored: a folder it mapped to `null` (by default `inbox/transcript/`) stays transcript-only for as long as the block is there, so an upgrade never starts sending those transcripts to a summarizer. For transcripts only everywhere, set `summarizer: none`.
 - **Lenses.** `meeting`, `gathering` and `conversation` are gone, along with `packs/styles/`. Nothing needs to be done: a workspace with no `packs/lenses/summary.<language>.md` uses the built-in one. To customize it, copy the file from the package's `templates/lenses/` into `packs/lenses/` and edit it. Old lens files left in `packs/lenses/` are harmless and unused.
 - **Packs.** `"type"` and `"style"` in `match.json` are ignored; the title keyword alone decides.
 - **File names.** Summaries are now `YYMMDD_title_summary.md`.

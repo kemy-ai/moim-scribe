@@ -63,3 +63,16 @@ STRONG 812s-841s | current Alice 0.412 vs Bob 0.587 | "line preview…"
 
 The verdict is always made by a human against the transcript. Similarity
 scores locate suspects; they never convict.
+
+## What the tool checks for you, and what it does not
+
+- **During processing**, a label whose long stretches split into two
+  different-sounding groups is logged as "two voices suspected" and marked in
+  `speakers.json`. It is a prompt to listen, never a relabel.
+- **At enrollment**, the same name on two labels of one recording is refused
+  (`--allow-duplicate`), and so is a voice below 0.5 similarity to that
+  person's existing fingerprint (`--force`). Neither number is a safety line.
+- **Not checked**: whether the label you are enrolling is one voice. An
+  automatic test for that was built and measured on real recordings: of 29
+  labels deliberately assembled from two people, it flagged 3. It was removed
+  rather than shipped as reassurance. Listening is still the check.

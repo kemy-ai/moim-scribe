@@ -90,12 +90,14 @@ Two things the pipeline already handles, so you don't have to:
 
 - files that exist but are still downloading are skipped until the size is
   stable AND the file actually decodes AND, on macOS, at least 95% of it is
-  physically on disk. The third check is the one that catches a partial
-  download: a file still being fetched reports its final size from the start
-  and its first 0.1s decodes, so a recording that was two-thirds downloaded
-  passed the first two and was transcribed as if it were whole. On Linux and
-  Windows that check is not applied (allocated blocks mean something else on
-  compressing filesystems, and Windows does not report them)
+  physically on disk or the whole file reads back. The third check is the one
+  that catches a partial download: a file still being fetched reports its
+  final size from the start and its first 0.1s decodes, so a recording that
+  was two-thirds downloaded passed the first two and was transcribed as if it
+  were whole. A complete file can also occupy fewer blocks than its size (a
+  compressed file, some network volumes); that is why a full read clears it
+  instead of being skipped on every pass. On Linux and Windows the block
+  check is not applied at all (Windows does not report blocks)
 - a file is claimed by an atomic move before processing, so a sync client
   re-uploading results can't cause double processing
 

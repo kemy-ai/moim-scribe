@@ -215,6 +215,30 @@ def test_merge_reassign_keys_within_allow_list(tmp_path):
     assert not extra, f"unclassified merge_reassign key(s): {extra} — is it prompt-safe?"
 
 
+def test_what_reaches_the_prompt_is_a_closed_set(tmp_path):
+    """The allow-lists above can be widened in one edit: add a key to
+    write_outputs and to KNOWN_*, and they pass whether or not speaker_stats
+    ever classified it. This one runs the maximal output through the prompt
+    filter and pins what comes out, so a new field needs a second, deliberate
+    edit here before it can be shown to the summarizer."""
+    from moim_scribe.speaker_stats import strip_diagnostic_keys
+
+    *_, data = _write(
+        tmp_path,
+        merged=_maximal_merged(),
+        id_mapping={"SPEAKER_00": "Ada"},
+        id_sims={"SPEAKER_00": [("Ada", 0.9)]},
+        merge_info=TRIGGERED_MERGE_INFO,
+        mixed_info=MIXED_INFO,
+    )
+    shown = strip_diagnostic_keys(data)
+    assert set(shown) <= {"n_speakers", "speakers", "merge_reassign", "excluded_noise_labels"}
+    for entry in shown["speakers"]:
+        assert set(entry) <= {"label", "talk_sec", "share", "identified", "raw_speaker", "match_score"}
+    if isinstance(shown.get("merge_reassign"), dict):
+        assert set(shown["merge_reassign"]) <= {"triggered"}
+
+
 def test_input_merged_not_mutated(tmp_path):
     merged = _merged()
     _write(tmp_path, merged=merged)

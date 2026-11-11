@@ -173,15 +173,23 @@ def cmd_process(args) -> int:
     if not src.exists():
         print(f"not found: {src}")
         return 1
+    summarize = True
     if args.type:
         # Accepted so that pre-0.2 scripts keep running, and said out loud so
-        # that nobody expects a type-specific result from it.
-        print(f"note: --type {args.type} is ignored: every recording gets the same summary")
+        # that nobody expects a type-specific result from it. The one thing a
+        # type still decides is "no summary", for the same reason the folders
+        # do (config.transcript_only_folders).
+        if args.type in cfg.transcript_only_folders:
+            summarize = False
+            print(f"note: --type {args.type} is transcript-only in this workspace's "
+                  "`types:` block, so no summary is written")
+        else:
+            print(f"note: --type {args.type} is ignored: every recording gets the same summary")
     # Work on a copy claimed into _processing; the user's original stays put.
     claimed = cfg.processing_dir / src.name
     shutil.copy2(src, claimed)
     try:
-        out = process_recording(cfg, claimed)
+        out = process_recording(cfg, claimed, summarize=summarize)
         print(f"result: {out}")
         return 0
     finally:
@@ -201,8 +209,7 @@ def cmd_enroll(args) -> int:
         return 1
     db = SpeakerDB(cfg.speakers_dir)
     result = enroll(args.audio, args.jsonl, mapping, db, cfg.embed_model_dir,
-                    allow_duplicate=args.allow_duplicate, force=args.force,
-                    enroll_all=args.enroll_all)
+                    allow_duplicate=args.allow_duplicate, force=args.force)
     # Tagging is a separate write on purpose: enroll() merges embeddings and
     # knows nothing about groups, and a failed tag must not read as a failed
     # enrollment — the fingerprint is the part that is expensive to redo.
@@ -402,9 +409,6 @@ def main(argv: list[str] | None = None) -> int:
                         "existing fingerprint. 0.5 is not a safety line - the same person "
                         "can score lower (phone audio, thin fingerprint). Listen to the "
                         "label before forcing")
-    p.add_argument("--enroll-all", action="store_true",
-                   help="skip segment selection and enroll every range of the label as "
-                        "before, even if it looks like more than one voice. Listen first")
     p.set_defaults(func=cmd_enroll)
 
     p = sub.add_parser("speakers", help="list enrolled speakers")

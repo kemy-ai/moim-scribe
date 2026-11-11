@@ -100,7 +100,7 @@ def test_scan_picks_up_an_extensionless_recording(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setattr(
         "moim_scribe.pipeline.process_recording",
-        lambda cfg_, claimed: seen.append(claimed.name) or claimed,
+        lambda cfg_, claimed, **kw: seen.append(claimed.name) or claimed,
     )
 
     counts = scan_inbox(cfg)

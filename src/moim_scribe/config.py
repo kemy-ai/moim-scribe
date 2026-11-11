@@ -63,6 +63,11 @@ class Config:
     summarizer: str = "claude_cli"
     summarizer_model: str | None = None
     summarizer_timeout_sec: int = 900
+    # Not a setting. Filled from a pre-0.2 `types:` block: the inbox subfolders
+    # it mapped to null (transcribe only). They stay transcribe-only, because a
+    # folder someone chose precisely so that its transcripts would not be sent
+    # to a summarizer must not start sending them on upgrade.
+    transcript_only_folders: frozenset = frozenset()
     # Default speaker count when neither the filename nor a spoken cue gives
     # one. 0 = let pyannote estimate (best for 3+ person meetings); set 2 for
     # workspaces that are mostly 1:1 conversations.
@@ -142,10 +147,19 @@ def load_config(workspace: str | Path) -> Config:
         # longer read rather than ignoring it in silence: a user who mapped a
         # folder to "transcribe only" would otherwise start getting summaries
         # with no hint as to why.
+        legacy = raw["types"] if isinstance(raw["types"], dict) else {}
+        cfg.transcript_only_folders = frozenset(
+            str(name) for name, lens in legacy.items() if lens is None
+        )
+        kept = (
+            f" Folders it mapped to null ({', '.join(sorted(cfg.transcript_only_folders))}) "
+            "stay transcript-only for as long as the block is there."
+            if cfg.transcript_only_folders else ""
+        )
         logger.warning(
             "config.yaml: `types:` is no longer used: every recording in inbox/ "
-            "(and its subfolders) gets the same summary. For transcripts only, "
-            "set `summarizer: none`. You can delete the `types:` block."
+            "(and its subfolders) gets the same summary." + kept + " For transcripts "
+            "only everywhere, set `summarizer: none` and delete the `types:` block."
         )
     return cfg
 

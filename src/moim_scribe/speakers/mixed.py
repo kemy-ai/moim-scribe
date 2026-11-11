@@ -52,6 +52,7 @@ import numpy as np
 # Gate constants - see the module docstring for where each value comes from.
 MIXED_LONG_BLOCK_SEC = 8.0      # a "long block" is at least this much speech
 MIXED_MIN_LONG_BLOCKS = 5       # fewer than this and a two-way split means nothing
+MIXED_MAX_LONG_BLOCKS = 150     # more than this and only the longest are used (cost)
 MIXED_MIN_CLUSTER_SEC = 60.0    # clusters with less total speech are skipped
 MIXED_MINOR_SHARE_MIN = 0.10    # minority group's share of seconds
 MIXED_CENTROID_SIM_MAX = 0.70   # at or below this the two centroids are two voices
@@ -178,6 +179,10 @@ def _check_one(result, wav, sr, merged, raw_labels, raw, tot, embed_fn, id_mappi
     if len(blocks) < MIXED_MIN_LONG_BLOCKS:
         result["skipped"][raw] = f"{len(blocks)} long blocks < {MIXED_MIN_LONG_BLOCKS}"
         return
+    # The two-way split below costs about n**3 (measured: 100 blocks 1.7 s, 200
+    # blocks 13 s) and runs inside the processing pass. The longest blocks carry
+    # the signal, so a very long recording is judged on those.
+    blocks = sorted(blocks, key=lambda b: -b["dur"])[:MIXED_MAX_LONG_BLOCKS]
     embs, durs = [], []
     for b in blocks:
         v, used = embed_fn(wav, sr, b["segs"])

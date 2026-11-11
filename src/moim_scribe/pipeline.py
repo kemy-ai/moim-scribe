@@ -39,6 +39,7 @@ STABILIZE_WAIT_SEC = 3.0
 PREFETCH_CHUNK_BYTES = 1 << 20
 PREFETCH_SLOW_SEC = 5.0  # above this, say so: the whole pass was held meanwhile
 MIN_ON_DISK_RATIO = 0.95  # see on_disk_ratio(): complete files measure 1.00
+RESULT_SUFFIXES = ("_transcript.txt", "_diarized.jsonl", "_summary.md")
 
 PROMPT_HEADERS = {
     "ko": {
@@ -233,8 +234,10 @@ def classify_audio(path: Path) -> bool:
     return False
 
 
-def _prefetch(path: Path) -> None:
+def _prefetch(path: Path) -> int | None:
     """Make a cloud-sync provider materialize an online-only placeholder.
+
+    Returns the number of bytes read, or None when the read failed.
 
     Google Drive, iCloud and Dropbox keep "online-only" files as stubs whose
     metadata already looks complete. Reading the bytes is what triggers the
@@ -251,21 +254,23 @@ def _prefetch(path: Path) -> None:
     Reads in chunks and discards them, so memory stays flat regardless of size.
     """
     t0 = time.time()
+    n_read = 0
     try:
         with path.open("rb") as fh:
-            while fh.read(PREFETCH_CHUNK_BYTES):
-                pass
+            while chunk := fh.read(PREFETCH_CHUNK_BYTES):
+                n_read += len(chunk)
     except OSError as e:
         # Not fatal: the checks below decide. A stub that cannot be read yet just
         # gets skipped this pass, exactly as before.
         logger.info(f"prefetch skipped ({type(e).__name__}) — continuing: {path.name}")
-        return
+        return None
     elapsed = time.time() - t0
     if elapsed > PREFETCH_SLOW_SEC:
         logger.info(
             f"prefetch of {path.name} took {elapsed:.0f}s (cloud download) — "
             "the pipeline was held for that time"
         )
+    return n_read
 
 
 def on_disk_ratio(path: Path) -> float | None:
@@ -306,7 +311,7 @@ def is_stable_audio(path: Path) -> bool:
     so a metadata check is not enough: the file must actually decode, and
     (where the platform can tell) actually be on disk.
     """
-    _prefetch(path)
+    n_read = _prefetch(path)
     try:
         s1 = path.stat().st_size
     except OSError:
@@ -321,11 +326,23 @@ def is_stable_audio(path: Path) -> bool:
         return False
     ratio = on_disk_ratio(path)
     if ratio is not None and ratio < MIN_ON_DISK_RATIO:
-        logger.info(
-            f"SKIP only {ratio:.0%} of the file is on disk (cloud download in "
-            f"progress?): {path.name}"
-        )
-        return False
+        # Few blocks has two readings. A download in progress is one; the other
+        # is a complete file that simply occupies less than its size (a
+        # compressed file measured 0.008 here, and some network volumes report
+        # no blocks at all). Skipping the second kind would skip it on every
+        # pass, forever. What tells them apart is whether the whole file could
+        # be read just now: in the partial-download incident the read failed.
+        if n_read is not None and n_read >= s2:
+            logger.info(
+                f"{ratio:.0%} of {path.name} is on disk by block count, but the whole "
+                "file read back: treating it as complete (compressed file or network volume)"
+            )
+        else:
+            logger.warning(
+                f"SKIP only {ratio:.0%} of the file is on disk and it could not be "
+                f"read in full (cloud download in progress?): {path.name}"
+            )
+            return False
     probe = subprocess.run(
         ["ffmpeg", "-v", "error", "-i", str(path), "-t", "0.1", "-f", "null", "-"],
         capture_output=True, timeout=60, check=False,
@@ -382,7 +399,24 @@ def quarantine_leftovers(cfg: Config) -> None:
         logger.warning(f"stranded file quarantined to _error (previous crash): {f.name}")
 
 
-def process_recording(cfg: Config, claimed: Path) -> Path:
+def free_result_base(results_dir: Path, base: str) -> str:
+    """A result name stem under which nothing exists in results/ yet.
+
+    Two recordings with the same title on the same day ("standup" from two
+    teams, or a second take) would otherwise write the same three files, and
+    the one lost for good is the jsonl: it is the only thing `enroll` can read.
+    """
+    def taken(b: str) -> bool:
+        return any((results_dir / f"{b}{suffix}").exists() for suffix in RESULT_SUFFIXES)
+
+    candidate, n = base, 2
+    while taken(candidate):
+        candidate = f"{base} ({n})"
+        n += 1
+    return candidate
+
+
+def process_recording(cfg: Config, claimed: Path, *, summarize: bool = True) -> Path:
     """Run one claimed file end-to-end. Returns the primary result path.
 
     Every recording takes the same route: diarize, name the speakers from the
@@ -446,13 +480,16 @@ def process_recording(cfg: Config, claimed: Path) -> Path:
         raise RuntimeError("empty transcript")
 
     cfg.results_dir.mkdir(parents=True, exist_ok=True)
-    out_txt = cfg.results_dir / f"{date_tag}_{title}_transcript.txt"
+    base = free_result_base(cfg.results_dir, f"{date_tag}_{title}")
+    if base != f"{date_tag}_{title}":
+        logger.info(f"results/ already has {date_tag}_{title}; writing this one as {base}")
+    out_txt = cfg.results_dir / f"{base}_transcript.txt"
     shutil.copy2(transcript_path, out_txt)
     # Keep the segment records too — they are the raw material for
     # `moim-scribe enroll` (mapping SPEAKER_NN ranges to names later).
     jsonl_src = Path(result["jsonl_path"])
     if jsonl_src.exists():
-        shutil.copy2(jsonl_src, cfg.results_dir / f"{date_tag}_{title}_diarized.jsonl")
+        shutil.copy2(jsonl_src, cfg.results_dir / f"{base}_diarized.jsonl")
 
     stats_path = Path(result["stats_path"])
 
@@ -471,6 +508,10 @@ def process_recording(cfg: Config, claimed: Path) -> Path:
         _note = check_stats_file(stats_path, _pack.name if _pack else None, db.load_index())
         if _note:
             logger.warning(_note)
+
+    if not summarize:
+        logger.info(f"transcript-only folder (pre-0.2 `types:` block): {out_txt}")
+        return out_txt
 
     # Decided before anything summary-related is loaded, so `summarizer: none`
     # works in a workspace that has no lens files at all.
@@ -511,7 +552,7 @@ def process_recording(cfg: Config, claimed: Path) -> Path:
         f"{h['transcript']}\n{transcript_path.read_text(encoding='utf-8')}"
     )
 
-    out_md = cfg.results_dir / f"{date_tag}_{title}_summary.md"
+    out_md = cfg.results_dir / f"{base}_summary.md"
     try:
         summary = summarizer.summarize(prompt)
     except Exception as e:
@@ -598,14 +639,16 @@ def inbox_folders(cfg: Config) -> list[Path]:
     sorted recordings into inbox/meeting/ and friends, keep working instead of
     having files sit there unseen. Names starting with "_" are the pipeline's
     own (_processing, _done, _error) and names starting with "." are hidden;
-    neither is ever input. One level only: a deep tree under inbox/ is more
+    neither is ever input. Symlinked folders are not followed: one pointing
+    at _done would reprocess the whole archive every pass, and one pointing at
+    someone else's folder would have its files moved out. One level only: a deep tree under inbox/ is more
     likely an accident (a synced folder dropped in whole) than an instruction.
     """
     folders = [cfg.inbox_dir]
     if cfg.inbox_dir.is_dir():
         folders += sorted(
             d for d in cfg.inbox_dir.iterdir()
-            if d.is_dir() and not d.name.startswith(("_", "."))
+            if d.is_dir() and not d.is_symlink() and not d.name.startswith(("_", "."))
         )
     return [d for d in folders if d.is_dir()]
 
@@ -644,7 +687,11 @@ def scan_inbox(cfg: Config) -> dict:
                     cfg.processing_dir / f"{stem}_speakers.json",
                 ]
                 try:
-                    process_recording(cfg, claimed)
+                    process_recording(
+                        cfg, claimed,
+                        summarize=folder.name not in cfg.transcript_only_folders
+                        or folder == cfg.inbox_dir,
+                    )
                 except Exception as e:  # noqa: BLE001 — one bad file must not stop the pass
                     logger.error(f"FAILED -> _error: {claimed.name} — {e}")
                     dest = archive_stem(cfg.error_dir, stem, claimed.suffix)

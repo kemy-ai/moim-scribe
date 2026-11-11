@@ -38,6 +38,8 @@ def test_a_leftover_types_block_is_reported_not_silently_dropped(tmp_path, caplo
     assert cfg.language == "en"          # the rest of the file still loads
     assert not hasattr(cfg, "types")
     assert any("types" in r.message and "summarizer: none" in r.message for r in caplog.records)
+    assert cfg.transcript_only_folders == frozenset({"raw"})
+    assert any("raw" in r.message and "transcript-only" in r.message for r in caplog.records)
 
 
 def test_no_warning_without_a_types_block(tmp_path, caplog):

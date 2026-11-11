@@ -9,7 +9,7 @@ ranges whose speaker identity a human has confirmed. Never re-enroll ranges
 that were themselves corrected by automated scanning — that feeds the
 model its own guesses (circular reinforcement).
 
-Two guards and one selection step stand between a mapping and the database,
+Two guards stand between a mapping and the database,
 because a wrong enrollment is silent: it does not fail, it makes every later
 recording slightly more wrong.
 
@@ -22,9 +22,14 @@ recording slightly more wrong.
     fingerprint scored 0.24 and 0.31. The value is deliberately low: this is a
     check on a human decision, not an automatic match, so wrongly blocking a
     correct confirmation costs more. It is not a safety line either way.
-  - Segment selection (speakers/select.py): a label that looks like more than
-    one voice is refused; otherwise only the segments consistent with the
-    label's stable core are enrolled. --enroll-all restores the old behaviour.
+
+What the guards do not do is judge whether a label is one voice. An automatic
+"is this label mixed?" test was tried here (leave-one-out similarity among the
+label's long segments) and measured on real recordings: of 29 labels that were
+deliberately built from two people, it flagged 3. A guard that passes nine in
+ten of what it exists to stop is worse than none, because it reads as cover.
+The two-voice check that runs during processing (speakers/mixed.py) is the
+signal to look at, and the remedy is still a human listening before enrolling.
 """
 from __future__ import annotations
 
@@ -42,13 +47,11 @@ from .embed import (
     extract_embedding_from_segments,
     load_wav_mono16k,
 )
-from .select import STABLE_MIN_SEC, select_segments
 
 logger = logging.getLogger("moim_scribe.speakers.enroll")
 
 MIN_TOTAL_SEC_WARN = 20.0
-MAX_SEGMENTS_PER_SPEAKER = 40      # --enroll-all: average the N longest ranges
-MAX_SELECT_SEGMENTS = 400          # selection embeds ranges one by one; cap for long recordings
+MAX_SEGMENTS_PER_SPEAKER = 40      # the N longest ranges are averaged into the fingerprint
 CONFIRM_MIN_SIMILARITY = 0.5       # see the module docstring - a sanity check, not a safety line
 
 
@@ -98,45 +101,12 @@ def _duplicate_refusals(mapping: dict[str, str], labels_in_file: set[str]) -> di
 
 
 def _embed_all(wav, sr, segments, embed_fn):
-    """The pre-selection behaviour: one average over the longest ranges."""
+    """One average over the longest ranges of the label."""
     valid = [(s, e) for s, e in segments if (e - s) >= MIN_SEGMENT_SEC]
     valid = sorted(valid, key=lambda se: se[1] - se[0], reverse=True)[:MAX_SEGMENTS_PER_SPEAKER]
     if not valid:
         return None, 0.0
     return embed_fn(wav, sr, valid)
-
-
-def _embed_selected(wav, sr, segments, embed_fn, label: str):
-    """Embed ranges one by one, then judge and select (speakers/select.py).
-
-    Returns (embedding | None, seconds, selection-info). A "mixed" decision
-    returns no embedding; "too_short" falls back to _embed_all.
-    """
-    valid = [(s, e) for s, e in segments if (e - s) >= MIN_SEGMENT_SEC]
-    valid = sorted(valid, key=lambda se: se[1] - se[0], reverse=True)[:MAX_SELECT_SEGMENTS]
-    embs, secs = [], []
-    for s, e in valid:
-        v, used = embed_fn(wav, sr, [(s, e)])
-        if v is not None:
-            embs.append(v)
-            secs.append(float(used))
-    if not embs:
-        return None, 0.0, {"decision": "no_ranges"}
-    info = select_segments(embs, secs)
-    if info["decision"] == "too_short":
-        logger.warning(
-            f"{label}: only {info['n_stable']} ranges of {STABLE_MIN_SEC:g} s or more - too few to judge "
-            "whether this label is one voice, so every range is enrolled as before"
-        )
-        emb, used = _embed_all(wav, sr, segments, embed_fn)
-        return emb, used, info
-    if info["decision"] == "mixed":
-        return None, 0.0, info
-    keep = info["keep"]
-    if not keep:
-        return None, 0.0, info
-    emb = np.mean(np.stack([np.asarray(embs[i], dtype=float).flatten() for i in keep]), axis=0)
-    return emb, sum(secs[i] for i in keep), info
 
 
 def enroll(
@@ -148,13 +118,12 @@ def enroll(
     *,
     allow_duplicate: bool = False,
     force: bool = False,
-    enroll_all: bool = False,
     embed_fn: Callable | None = None,
 ) -> dict:
     """Embed each mapped speaker's ranges and upsert into the fingerprint DB.
 
     Returns {"enrolled": [names], "refused": [{"label", "name", "kind", "reason"}],
-    "checks": [{"label", "name", "similarity"}], "selection": {label: info}}.
+    "checks": [{"label", "name", "similarity"}]}.
     A refused pair is skipped; the others still go in. The similarity is
     recorded even under --force, so "how different was it?" stays answerable.
     embed_fn(wav, sr, ranges) -> (embedding | None, seconds) is injectable for
@@ -167,7 +136,7 @@ def enroll(
     segs = load_segments(jsonl)
     if not segs:
         raise SystemExit("no segments in jsonl")
-    result: dict = {"enrolled": [], "refused": [], "checks": [], "selection": {}}
+    result: dict = {"enrolled": [], "refused": [], "checks": []}
 
     def refuse(spk: str, name: str, kind: str, reason: str, override: str) -> None:
         msg = f"{spk} -> {name} not enrolled ({kind}): {reason}. {override}"
@@ -215,27 +184,8 @@ def enroll(
         segments = by_speaker[spk]
         if not segments:
             continue
-        if enroll_all:
-            logger.info(f"{spk} -> {name}: embedding (top {MAX_SEGMENTS_PER_SPEAKER} longest ranges)…")
-            emb, used_sec = _embed_all(wav, sr, segments, embed_fn)
-        else:
-            logger.info(f"{spk} -> {name}: embedding ranges one by one for selection…")
-            emb, used_sec, info = _embed_selected(wav, sr, segments, embed_fn, spk)
-            result["selection"][spk] = info
-            if info["decision"] == "mixed":
-                refuse(spk, name, "label looks mixed",
-                       f"{info['outlier_fraction'] * 100:.0f}% of its {info['n_stable']} longest "
-                       "ranges do not resemble the rest (one voice is usually under 20%), so "
-                       "part of it is probably someone else",
-                       "Listen to the label. If it really is one person, rerun with "
-                       "--enroll-all; otherwise enroll this person from another recording.")
-                continue
-            if info["decision"] == "selected":
-                logger.info(
-                    f"{spk}({name}): kept {len(info['keep'])}/{info['n_segments']} ranges "
-                    f"({info['kept_sec']}s of {info['total_sec']}s) consistent with the "
-                    "label's core"
-                )
+        logger.info(f"{spk} -> {name}: embedding (top {MAX_SEGMENTS_PER_SPEAKER} longest ranges)…")
+        emb, used_sec = _embed_all(wav, sr, segments, embed_fn)
         if emb is None:
             logger.warning(f"{spk}({name}): no usable ranges (>=1s) — not enrolled")
             continue

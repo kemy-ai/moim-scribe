@@ -46,4 +46,5 @@ Group by topic. For each topic, say who said what and how it developed:
 - A recording with no decisions or action items (a catch-up, a lecture, an interview) simply omits those sections and spends its length on "What was discussed". Never manufacture a decision.
 - Do not flatten everything into neutral summary; where views differed or someone pushed back, keep that visible.
 - Never move an unidentified label's (SPEAKER_NN) words onto a specific person by guesswork. Keep the label.
+- Write the deliverable in the language the transcript is in, whatever language these instructions are in.
 - Spell people's names the way the "Recording title" and the "Background" block (when present) spell them. Those are authoritative even where the transcript heard a name differently.

@@ -1,4 +1,4 @@
-"""Enrollment guards and segment selection, end to end through enroll().
+"""Enrollment guards, end to end through enroll().
 
 No model: the embedder is injected and looks a vector up by range start.
 Voices are built so the numbers are realistic rather than ideal: segments of
@@ -10,7 +10,6 @@ import numpy as np
 import pytest
 
 from moim_scribe.speakers import enroll as en
-from moim_scribe.speakers import select as sel
 from moim_scribe.speakers.db import SpeakerDB
 
 DIM = 128
@@ -154,92 +153,21 @@ def test_new_name_has_nothing_to_compare(tmp_path):
     assert res["enrolled"] == ["Bo"] and res["checks"] == []
 
 
-# ── segment selection ────────────────────────────────────────────────────────
+# ── what gets averaged ───────────────────────────────────────────────────────
 
-def test_mixed_label_is_refused_and_selection_is_not_attempted(tmp_path):
+def test_every_range_of_the_label_goes_into_one_average(tmp_path):
+    """No selection step: the fingerprint is the average of the label's longest
+    ranges, as it was before 0.2. (A selection step was built and removed; see
+    the enroll module docstring for the measurement that removed it.)"""
     vs = Voices()
-    rec = Rec()
-    for _ in range(5):
-        rec.add("SPEAKER_00", 10, vs.seg(0)).add("SPEAKER_00", 10, vs.seg(1))
+    rec = Rec().add("SPEAKER_00", 10, lambda: vs.seg(0), 6).add("SPEAKER_00", 2, lambda: vs.seg(0), 4)
     res, db = run(tmp_path, rec, {"SPEAKER_00": "Ada"})
-    assert res["enrolled"] == []
-    info = res["selection"]["SPEAKER_00"]
-    assert info["decision"] == "mixed" and info["outlier_fraction"] == 1.0
-    assert "--enroll-all" in res["refused"][0]["reason"]
-    assert db.get_embedding("Ada") is None
-
-
-def test_enroll_all_escape_hatch_takes_the_mixed_label(tmp_path):
-    vs = Voices()
-    rec = Rec()
-    for _ in range(5):
-        rec.add("SPEAKER_00", 10, vs.seg(0)).add("SPEAKER_00", 10, vs.seg(1))
-    res, _ = run(tmp_path, rec, {"SPEAKER_00": "Ada"}, enroll_all=True)
     assert res["enrolled"] == ["Ada"]
-    assert res["selection"] == {}
+    assert set(res) == {"enrolled", "refused", "checks"}
+    assert db.load_index()["Ada"]["total_sec"] == pytest.approx(68.0, abs=0.1)
 
 
-def test_clean_label_keeps_its_short_ranges_and_drops_the_intruder(tmp_path):
-    """Short ranges of the same voice must survive (the membership measure
-    would have dropped them); a short intruding range must not."""
-    vs = Voices()
-    rec = (Rec().add("SPEAKER_00", 10, lambda: vs.seg(0), 8)
-           .add("SPEAKER_00", 2, lambda: vs.seg(0), 4)
-           .add("SPEAKER_00", 2, lambda: vs.seg(1), 2))
-    res, db = run(tmp_path, rec, {"SPEAKER_00": "Ada"})
-    info = res["selection"]["SPEAKER_00"]
-    assert info["decision"] == "selected"
-    assert len(info["keep"]) == 12
-    assert info["kept_sec"] == 88.0
-    assert db.load_index()["Ada"]["total_sec"] == 88.0
+def test_enroll_takes_no_selection_switch():
+    import inspect
 
-
-def test_too_few_long_ranges_falls_back_to_enrolling_everything(tmp_path, caplog):
-    vs = Voices()
-    rec = Rec().add("SPEAKER_00", 10, lambda: vs.seg(0), 4).add("SPEAKER_00", 3, lambda: vs.seg(0), 5)
-    res, _ = run(tmp_path, rec, {"SPEAKER_00": "Ada"})
-    assert res["selection"]["SPEAKER_00"]["decision"] == "too_short"
-    assert res["enrolled"] == ["Ada"]
-    assert "too few to judge" in caplog.text
-
-
-# ── select.py boundaries ─────────────────────────────────────────────────────
-
-def _stable(n, vec):
-    return [vec] * n, [10.0] * n
-
-
-def test_exactly_five_stable_ranges_are_judged_four_are_not():
-    e = np.eye(4)[0]
-    assert sel.select_segments(*_stable(5, e))["decision"] == "selected"
-    assert sel.select_segments(*_stable(4, e))["decision"] == "too_short"
-    embs, durs = _stable(5, e)
-    durs[0] = 7.9  # 7.9 s is not stable
-    assert sel.select_segments(embs, durs)["decision"] == "too_short"
-
-
-def test_outlier_fraction_boundary(monkeypatch):
-    e = np.eye(4)[0]
-    monkeypatch.setattr(sel, "membership_outlier_fraction", lambda S: 0.5)
-    assert sel.select_segments(*_stable(6, e))["decision"] == "mixed"
-    monkeypatch.setattr(sel, "membership_outlier_fraction", lambda S: 0.49)
-    assert sel.select_segments(*_stable(6, e))["decision"] == "selected"
-
-
-def test_core_similarity_boundary():
-    base = np.zeros(8)
-    base[0] = 1.0
-    embs = [base] * 6 + [at(base, 0.51, 1), at(base, 0.49, 2)]
-    durs = [10.0] * 6 + [2.0, 2.0]
-    info = sel.select_segments(embs, durs)
-    assert info["keep"] == [0, 1, 2, 3, 4, 5, 6]
-    assert info["max_dropped_sim"] == pytest.approx(0.49, abs=1e-3)
-
-
-def test_single_voice_membership_is_low_and_mixed_is_total():
-    """The calibration's two ends, reproduced with realistic within-voice 0.7."""
-    vs = Voices()
-    one = sel._unit_rows([vs.seg(0) for _ in range(10)])
-    assert sel.membership_outlier_fraction(one) == 0.0
-    two = sel._unit_rows([vs.seg(i % 2) for i in range(10)])
-    assert sel.membership_outlier_fraction(two) == 1.0
+    assert "enroll_all" not in inspect.signature(en.enroll).parameters

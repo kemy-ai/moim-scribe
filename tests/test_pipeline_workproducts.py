@@ -13,7 +13,7 @@ SUFFIXES = ("_transcript_diarized.jsonl", "_transcript_diarized.txt", "_speakers
 RESULT_JSONL = "260730_rec_diarized.jsonl"
 
 
-def _fake_process(cfg, claimed):
+def _fake_process(cfg, claimed, **kw):
     """Stand in for process_recording: same side effects, no models."""
     for suffix in SUFFIXES:
         (cfg.processing_dir / f"{claimed.stem}{suffix}").write_text("x", encoding="utf-8")
@@ -54,7 +54,7 @@ def test_processing_dir_is_left_clean(tmp_path, monkeypatch):
 
 
 def test_failure_keeps_the_txt_for_diagnosis_and_quarantines_the_audio(tmp_path, monkeypatch):
-    def failing(cfg, claimed):
+    def failing(cfg, claimed, **kw):
         _fake_process(cfg, claimed)
         raise RuntimeError("boom")
 

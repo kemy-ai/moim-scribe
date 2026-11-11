@@ -23,7 +23,7 @@ def _drop(cfg, name, body):
     (cfg.inbox_dir / name).write_bytes(body * 5000)
 
 
-def _ok(cfg_, claimed):
+def _ok(cfg_, claimed, **kw):
     stem = claimed.stem
     (cfg_.processing_dir / f"{stem}_transcript_diarized.txt").write_text(
         claimed.read_bytes()[:5].decode(), encoding="utf-8")
@@ -57,7 +57,7 @@ def test_same_name_in_two_subfolders_in_one_pass(cfg, monkeypatch):
 
 
 def test_failures_with_the_same_name_are_both_kept_in_error(cfg, monkeypatch):
-    def boom(cfg_, claimed):
+    def boom(cfg_, claimed, **kw):
         (cfg_.processing_dir / f"{claimed.stem}_transcript_diarized.txt").write_text("t")
         raise RuntimeError("x")
 

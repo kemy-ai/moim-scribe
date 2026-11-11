@@ -23,11 +23,12 @@ def ws(tmp_path, monkeypatch):
     cfg = load_config(tmp_path)
     ensure_workspace_dirs(cfg)
     monkeypatch.setattr("moim_scribe.pipeline.is_stable_audio", lambda p: True)
-    seen = []
+    seen, calls = [], []
     monkeypatch.setattr(
         "moim_scribe.pipeline.process_recording",
-        lambda cfg_, claimed: seen.append(claimed.name) or claimed,
+        lambda cfg_, claimed, **kw: seen.append(claimed.name) or calls.append(kw) or claimed,
     )
+    cfg._calls = calls
     return cfg, seen
 
 
@@ -247,9 +248,9 @@ def test_process_command_ignores_a_pre_0_2_type_flag(tmp_path, monkeypatch, caps
     src.write_bytes(b"x" * 100)
     got = []
     monkeypatch.setattr("moim_scribe.pipeline.process_recording",
-                        lambda cfg_, claimed: got.append(claimed.name) or claimed)
+                        lambda cfg_, claimed, **kw: got.append((claimed.name, kw)) or claimed)
     assert cli.main(["process", str(src), "--type", "meeting", "--workspace", str(cfg.workspace)]) == 0
-    assert got == ["rec.m4a"]
+    assert got == [("rec.m4a", {"summarize": True})]
     assert "ignored" in capsys.readouterr().out
     assert cli.main(["process", str(src), "--workspace", str(cfg.workspace)]) == 0
     assert "ignored" not in capsys.readouterr().out
@@ -294,11 +295,15 @@ def test_on_disk_ratio_cannot_tell_is_not_zero(monkeypatch):
     assert on_disk_ratio(_FakePath(_stat(0, 0))) is None
 
 
-def _stable(monkeypatch, tmp_path, ratio):
+def _stable(monkeypatch, tmp_path, ratio, read="failed"):
+    """read: "failed" (OSError during the read), "short" (stopped early) or
+    "whole" (every byte came back)."""
     f = tmp_path / "rec.m4a"
     f.write_bytes(b"x" * 20000)
     monkeypatch.setattr(pipeline, "STABILIZE_WAIT_SEC", 0)
     monkeypatch.setattr(pipeline, "on_disk_ratio", lambda p: ratio)
+    monkeypatch.setattr(pipeline, "_prefetch",
+                        lambda p: {"failed": None, "short": 12900, "whole": 20000}[read])
     probes = []
     monkeypatch.setattr(
         pipeline.subprocess, "run",
@@ -314,7 +319,31 @@ def test_a_partly_downloaded_file_is_skipped_even_though_it_decodes(monkeypatch,
     with caplog.at_level(logging.INFO, logger="moim_scribe.pipeline"):
         assert pipeline.is_stable_audio(f) is False
     assert probes == []                                   # stopped before the probe
-    assert any("on disk" in r.message and "rec.m4a" in r.message for r in caplog.records)
+    hit = [r for r in caplog.records if "on disk" in r.message and "rec.m4a" in r.message]
+    assert hit and hit[0].levelno == logging.WARNING      # a skip that can repeat must be loud
+
+
+def test_a_read_that_stopped_short_counts_as_partial(monkeypatch, tmp_path):
+    f, _ = _stable(monkeypatch, tmp_path, 0.645, read="short")
+    assert pipeline.is_stable_audio(f) is False
+
+
+def test_a_complete_file_with_few_blocks_is_not_skipped_forever(monkeypatch, tmp_path, caplog):
+    """🔴 A compressed file measured 0.008 by block count, and some network
+    volumes report no blocks. Skipping on the ratio alone would skip such a
+    file on every pass. The whole file reading back is what clears it."""
+    f, probes = _stable(monkeypatch, tmp_path, 0.008, read="whole")
+    with caplog.at_level(logging.INFO, logger="moim_scribe.pipeline"):
+        assert pipeline.is_stable_audio(f) is True
+    assert len(probes) == 1                               # still has to decode
+    assert any("read back" in r.message for r in caplog.records)
+
+
+def test_prefetch_reports_how_much_it_read(tmp_path):
+    f = tmp_path / "rec.m4a"
+    f.write_bytes(b"x" * 12345)
+    assert pipeline._prefetch(f) == 12345
+    assert pipeline._prefetch(tmp_path / "missing.m4a") is None
 
 
 @pytest.mark.parametrize("ratio,expected", [(0.949, False), (0.95, True), (1.0, True), (1.3, True)])
@@ -329,3 +358,104 @@ def test_an_unmeasurable_ratio_does_not_block_the_file(monkeypatch, tmp_path):
     f, probes = _stable(monkeypatch, tmp_path, None)
     assert pipeline.is_stable_audio(f) is True
     assert len(probes) == 1
+
+
+# --- pre-0.2 transcript-only folders ----------------------------------------
+
+def _legacy_ws(tmp_path, monkeypatch):
+    (tmp_path / "config.yaml").write_text(
+        "language: en\ntypes:\n  meeting: meeting\n  transcript: null\n", encoding="utf-8")
+    cfg = load_config(tmp_path)
+    ensure_workspace_dirs(cfg)
+    monkeypatch.setattr("moim_scribe.pipeline.is_stable_audio", lambda p: True)
+    calls = {}
+    monkeypatch.setattr(
+        "moim_scribe.pipeline.process_recording",
+        lambda cfg_, claimed, **kw: calls.__setitem__(claimed.name, kw) or claimed,
+    )
+    return cfg, calls
+
+
+def test_a_folder_that_was_transcribe_only_stays_that_way(tmp_path, monkeypatch):
+    """🔴 Privacy. Before 0.2, inbox/transcript/ shipped as transcribe-only. An
+    unattended watcher that gets upgraded must not start sending those
+    transcripts to a cloud summarizer because nobody read the release notes."""
+    cfg, calls = _legacy_ws(tmp_path, monkeypatch)
+    assert cfg.transcript_only_folders == frozenset({"transcript"})
+    _audio(cfg.inbox_dir / "transcript" / "private.m4a")
+    _audio(cfg.inbox_dir / "meeting" / "team.m4a")
+    _audio(cfg.inbox_dir / "root.m4a")
+    scan_inbox(cfg)
+    assert calls["private.m4a"] == {"summarize": False}
+    assert calls["team.m4a"] == {"summarize": True}
+    assert calls["root.m4a"] == {"summarize": True}
+
+
+def test_without_a_types_block_nothing_is_transcript_only(ws):
+    cfg, _ = ws
+    assert cfg.transcript_only_folders == frozenset()
+    _audio(cfg.inbox_dir / "transcript" / "a.m4a")
+    scan_inbox(cfg)
+    assert cfg._calls == [{"summarize": True}]
+
+
+def test_summarize_false_stops_before_the_summarizer(tmp_path, monkeypatch):
+    cfg = _workspace(tmp_path)
+    _stub_engine(cfg, monkeypatch, _Summarizer())
+    monkeypatch.setattr(pipeline, "get_summarizer",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not be built")))
+    out = pipeline.process_recording(cfg, _claimed(cfg), summarize=False)
+    assert out.name.endswith("_transcript.txt")
+    assert not list(cfg.results_dir.glob("*_summary.md"))
+
+
+def test_process_type_flag_keeps_a_transcript_only_type(tmp_path, monkeypatch, capsys):
+    (tmp_path / "config.yaml").write_text("types:\n  transcript: null\n", encoding="utf-8")
+    src = tmp_path / "rec.m4a"
+    src.write_bytes(b"x" * 100)
+    got = []
+    monkeypatch.setattr("moim_scribe.pipeline.process_recording",
+                        lambda cfg_, claimed, **kw: got.append(kw) or claimed)
+    assert cli.main(["process", str(src), "--type", "transcript", "--workspace", str(tmp_path)]) == 0
+    assert got == [{"summarize": False}]
+    assert "no summary" in capsys.readouterr().out
+
+
+# --- results/ never overwrites ------------------------------------------------
+
+def test_same_title_on_the_same_day_gets_its_own_result_files(tmp_path, monkeypatch):
+    """🔴 The jsonl in results/ is the only thing `enroll` can read. Two
+    recordings called "standup" on one day used to leave one jsonl."""
+    cfg = _workspace(tmp_path)
+    _stub_engine(cfg, monkeypatch, _Summarizer())
+    first = pipeline.process_recording(cfg, _claimed(cfg, "standup.m4a"))
+    second = pipeline.process_recording(cfg, _claimed(cfg, "standup.m4a"))
+    assert first != second and first.exists() and second.exists()
+    assert second.name.endswith("_standup (2)_summary.md")
+    assert len(list(cfg.results_dir.glob("*_diarized.jsonl"))) == 2
+    assert len(list(cfg.results_dir.glob("*_transcript.txt"))) == 2
+
+
+def test_free_result_base_looks_at_all_three_files(tmp_path):
+    from moim_scribe.pipeline import free_result_base
+
+    assert free_result_base(tmp_path, "260101_x") == "260101_x"
+    (tmp_path / "260101_x_diarized.jsonl").write_text("{}", encoding="utf-8")   # only the jsonl
+    assert free_result_base(tmp_path, "260101_x") == "260101_x (2)"
+    (tmp_path / "260101_x (2)_summary.md").write_text("#", encoding="utf-8")
+    assert free_result_base(tmp_path, "260101_x") == "260101_x (3)"
+
+
+# --- symlinked folders ---------------------------------------------------------
+
+def test_a_symlinked_subfolder_is_not_scanned(ws):
+    """inbox/archive -> _done would reprocess the whole archive every pass."""
+    cfg, seen = ws
+    _audio(cfg.done_dir / "old.m4a")
+    try:
+        (cfg.inbox_dir / "archive").symlink_to(cfg.done_dir, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks not permitted here")
+    assert scan_inbox(cfg)["processed"] == 0
+    assert seen == []
+    assert (cfg.done_dir / "old.m4a").exists()

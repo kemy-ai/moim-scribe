@@ -155,7 +155,7 @@ class TestEnrollTagging:
             workspace=str(tmp_path), audio="a.m4a", jsonl="a.jsonl",
             mapping=[f"SPEAKER_0{i}={n}" for i, n in enumerate(names)],
             group=group, attends_all=attends_all,
-            allow_duplicate=False, force=False, enroll_all=False)
+            allow_duplicate=False, force=False)
         assert cli.cmd_enroll(args) == 0
         return db.load_index()
 
@@ -205,6 +205,6 @@ class TestEnrollTagging:
         args = argparse.Namespace(
             workspace=str(tmp_path), audio="a.m4a", jsonl="a.jsonl",
             mapping=["SPEAKER_00=Ari"], group="book-club", attends_all=False,
-            allow_duplicate=False, force=False, enroll_all=False)
+            allow_duplicate=False, force=False)
         assert cli.cmd_enroll(args) == 1
         assert "groups" not in db.load_index()["Ari"]
