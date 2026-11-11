@@ -11,7 +11,7 @@ A meeting, a gathering, a consultation, a call, a lecture: all are written up in
 
 ## Overview
 - In one line: (what this recording was about)
-- Attendees: N - names/labels (take the count from the "Speaker stats" data above; never guess from the conversation)
+- Attendees: N - names/labels (take the count from the "Speaker stats" data above; never guess from the conversation; see the attendee-count rule under "How to write it")
 - When: use the recorded-at time from "Recording info" above; an explicit date/time mentioned in the transcript wins
 - Flow: (the whole arc in one line of arrows, e.g. catch-up → last week's review → new items → scheduling)
 
@@ -46,5 +46,6 @@ Group by topic. For each topic, say who said what and how it developed:
 - A recording with no decisions or action items (a catch-up, a lecture, an interview) simply omits those sections and spends its length on "What was discussed". Never manufacture a decision.
 - Do not flatten everything into neutral summary; where views differed or someone pushed back, keep that visible.
 - Never move an unidentified label's (SPEAKER_NN) words onto a specific person by guesswork. Keep the label.
+- Attendee count: if an "attendee count fixed by filename" note appears above, that number is the attendee count. Without that note, the number of labels in the speaker stats was estimated automatically, and one person is often split across several labels. In that case do not write "Attendees: N"; write "Attendees: N speaker labels (estimated, the real number of people may be lower)".
 - Write the deliverable in the language the transcript is in, whatever language these instructions are in.
 - Spell people's names the way the "Recording title" and the "Background" block (when present) spell them. Those are authoritative even where the transcript heard a name differently.

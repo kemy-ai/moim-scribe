@@ -119,6 +119,21 @@ def test_summary_lens_says_which_language_to_write_in():
     assert "in the language the transcript is in" in en
 
 
+def test_summary_lens_does_not_state_an_estimated_label_count_as_attendees():
+    """Measured on a real recording: three people, no count given, seven
+    labels, and the summary said "7 attendees". The lens now ties the attendee
+    count to the filename note and hedges otherwise."""
+    ko = (LENSES / f"{SUMMARY_LENS}.ko.md").read_text(encoding="utf-8")
+    en = (LENSES / f"{SUMMARY_LENS}.en.md").read_text(encoding="utf-8")
+    assert "파일명 지정 참석 인원" in ko and "화자 라벨 N개" in ko
+    assert "attendee count fixed by filename" in en and "N speaker labels" in en
+    # the phrases the lens keys on must be the ones the pipeline really prints
+    from moim_scribe.pipeline import PROMPT_HEADERS
+
+    assert "파일명 지정 참석 인원" in PROMPT_HEADERS["ko"]["spk_fixed"]
+    assert "attendee count fixed by filename" in PROMPT_HEADERS["en"]["spk_fixed"]
+
+
 def test_round_card_headers_exist_letter_for_letter_in_the_lens():
     """🔴 Round cards are harvested by header. If the lens renames a section and
     packs.SECTION_HEADERS does not follow, every card silently comes out

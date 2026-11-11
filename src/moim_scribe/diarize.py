@@ -1215,10 +1215,18 @@ def run_diarization(
                 )
             else:
                 num_spk = default_speakers or None
-                logger.info(
-                    f"no spoken cue -> {'default ' + str(num_spk) if num_spk else 'pyannote auto-estimate'}"
-                    " (saying the attendee count at the start of the recording is more reliable)"
-                )
+                if num_spk:
+                    logger.info(f"no spoken cue -> default_speakers {num_spk}")
+                else:
+                    # Measured on a real 27-minute recording of three people:
+                    # estimation produced seven labels. Not an error, but the
+                    # user should hear it once per recording, and how to avoid it.
+                    example = "회의 4명" if language == "ko" else "meeting 4p"
+                    logger.warning(
+                        "no speaker count in the file name and none spoken: estimating. "
+                        "Estimation often splits one person into several labels. For a "
+                        f"reliable result put the count in the file name, e.g. \"{example}\""
+                    )
 
         # whisper and pyannote are independent until the merge step: run them in
         # parallel. They share the GPU, so each is slower than solo, but the total

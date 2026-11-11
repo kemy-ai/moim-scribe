@@ -34,7 +34,7 @@ Fingerprints never cross the dashed line. Two things can, each only if you choos
 | | what it does |
 |---|---|
 | **Speaker separation** | splits the recording by who spoke when (`SPEAKER_00`, `SPEAKER_01` …) |
-| **Voice fingerprints** | you confirm who is who once; from the next recording on, those people are named automatically |
+| **Voice fingerprints** | you confirm who is who once; from the next recording on, those people are named automatically wherever the match is confident (see "What to expect") |
 | **Summary** | one summary format for every recording, with attendees, talk share, what was discussed, decisions and action items when there are any. Needs a summarizer: Claude Code by default (sends the transcript to Anthropic), or Ollama (local), or `none` (diarized transcripts only, no summary) |
 
 **Optional: off until you set it up, and the core does not depend on any of it.**
@@ -48,6 +48,24 @@ Fingerprints never cross the dashed line. Two things can, each only if you choos
 | Background service | launchd / systemd / Task Scheduler templates | [docs/deployment.md](docs/deployment.md) |
 
 **Not included.** Publishing to Notion or other tools, chat notifications (Slack and the like), and phone-to-computer intake are deliberately left out. A cloud-synced folder (iCloud Drive, Google Drive, Dropbox) works as the inbox with no integration at all, and anything else can be built around `results/`, which is plain files.
+
+## What to expect
+
+Measured before the 0.2 release on real Korean recordings of the same three people (similar voices), against labels a person had checked. These are single recordings, not a benchmark: they show the range, not an average.
+
+| recording | speaker count | result |
+|---|---|---|
+| 67 minutes, count in the file name | 3 labels for 3 people | 98.7% of the speech carried the same speaker as the checked labels |
+| 4-minute excerpt, count in the file name (Windows, CPU) | 3 labels for 3 people | 97.0% |
+| another day, 27 minutes, no count given | **7 labels for 3 people** | after enrolling from the first recording: 56.8% of the speech got the right name, 1.9% a wrong name, 41.3% stayed `SPEAKER_NN` |
+| the same 27 minutes, count in the file name | 3 labels, two of them mixing people | 47.9% right name, 1.5% wrong name, 50.6% stayed `SPEAKER_NN` |
+
+What that means in practice:
+
+- **Put the number of people in the file name.** Without it the count is estimated, and estimation often splits one person into several labels. The run says so in a warning, and the summary then reports "N speaker labels (estimated)" instead of an attendee count.
+- **A name is attached only when the match is confident.** The tool would rather leave `SPEAKER_NN` than guess: across these runs a wrong name landed on under 2% of the speech. Expect unnamed stretches, especially with similar voices, and check the transcript before trusting who said what.
+- **Recordings differ.** The same three people gave 98.7% on one day and about half on another. Voices that sound alike get merged or split by the diarization model itself; fingerprints cannot repair that after the fact, and enrolling from more than one recording helps the matching, not the splitting.
+- **Speed.** On an Apple Silicon Mac the 67-minute recording took 17 minutes (peak memory 1.1 GB). On a laptop CPU without a GPU, expect about 1.5 to 2.5 times the length of the recording.
 
 ## Why another whisper + pyannote script?
 
@@ -85,7 +103,7 @@ Setup and the quota you have to manage: [docs/setup-soniox.md](docs/setup-soniox
 
 ## Install
 
-You need Python 3.11, 3.12 or 3.13, `git`, and [ffmpeg](https://ffmpeg.org) (it provides `ffmpeg` and `ffprobe`). Each block below starts from nothing: it creates a virtual environment first, so the `moim-scribe` command exists only while that environment is active (activate it again in every new terminal). Use `[mlx]` on an Apple Silicon Mac and `[cross]` on Windows and Linux. Intel Macs are not supported (see "Platform support").
+You need Python 3.11 or newer (clean installs were run on 3.12 and 3.14; CI runs 3.11 to 3.13), `git`, and [ffmpeg](https://ffmpeg.org) (it provides `ffmpeg` and `ffprobe`). Each block below starts from nothing: it creates a virtual environment first, so the `moim-scribe` command exists only while that environment is active (activate it again in every new terminal). Use `[mlx]` on an Apple Silicon Mac and `[cross]` on Windows and Linux. Intel Macs are not supported (see "Platform support").
 
 **What to expect.** Installing takes a couple of minutes and about 1.6 GB of disk for the virtual environment (measured on Apple Silicon with Python 3.12: 134 s). The first recording downloads about 1.6 GB of models once (measured: about 3 minutes), and the first `enroll` downloads the speaker model (about 170 MB). The first `doctor` can sit silent for up to a minute while it imports the heavy packages.
 
