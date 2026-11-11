@@ -2,6 +2,8 @@
 
 **반복해서 만나는 모임을 위한 로컬 우선 음성 파이프라인 — 같은 사람들이 자주 만날수록 더 정확해집니다.**
 
+기본 설정에서는 요약 단계가 전사본을 Claude Code를 통해 Anthropic으로 보냅니다. `summarizer: ollama` 또는 `summarizer: none`으로 바꾸면 모든 것이 내 컴퓨터 안에 머뭅니다.
+
 독서모임, 글쓰기 모임, 매주 하는 팀 회의처럼 **같은 멤버가 반복해서 만나는 자리**를 위해 만들었습니다. 지정 폴더를 감시하다가 녹음 파일이 들어오면: 전사(whisper) → 화자분리(pyannote) → **회차마다 쌓이는 음성 지문 DB와 대조해 실명 자동 매칭** → 요약까지. 어떤 종류의 녹음인지 묻지 않습니다. 회의든 통화든 독서모임이든 같은 폴더에 넣고 같은 형식으로 받습니다. 음성 지문은 항상 로컬입니다. 직접 고르는 단계가 둘 있습니다 — 전사는 기본이 내 컴퓨터이고 Soniox로 보낼 수도 있으며, 정리는 로컬(Ollama 또는 생략) 또는 클라우드 LLM(Claude)입니다.
 
 > **동의가 먼저입니다.** moim-scribe는 참가자 전원의 동의 아래 스스로를 녹음하는 모임을 위해 만들어졌습니다. 음성 지문은 생체정보입니다 — 몰래 녹음하거나 동의 없이 사람을 식별하는 데 절대 쓰지 마세요. **사적 관계에서 특히 그렇습니다**: 연인·가족과의 대화는 한쪽이 말 없이 녹음할 유인이 가장 큰 경우이고, 그래서 가장 하지 말아야 하는 경우입니다. 많은 나라에서 이것은 무례가 아니라 불법입니다: [docs/privacy.md](docs/privacy.md)
@@ -19,11 +21,11 @@ flowchart TD
         C --> D["results/<br>정리 md + 전사 txt"]
         V["enroll · verify 명령"] -.-> FP
     end
-    B -.->|"stt: soniox 선택 시에만<br>녹음 파일 자체를 전송"| STT["Soniox<br>클라우드 STT"]
-    C -.->|"클라우드 백엔드 선택 시에만<br>전사본 전송 (claude_cli · anthropic_api)"| LLM["클라우드 LLM"]
+    B -.->|"stt_backend: soniox 선택 시에만<br>녹음 파일 자체를 전송"| STT["Soniox<br>클라우드 STT"]
+    C -.->|"클라우드 백엔드 선택 시에만<br>전사본과 몇 가지 정보 전송 (claude_cli · anthropic_api)"| LLM["클라우드 LLM"]
 ```
 
-지문은 점선을 절대 넘지 않습니다. 넘을 수 있는 것은 둘이고 각각 직접 골라야만 넘습니다 — 녹음 파일(`stt: soniox`)과 전사본(클라우드 정리 백엔드). `soniox` + `none` 조합이면 녹음은 나가고 전사본은 안 나가며, `mlx` + `ollama`면 아무것도 안 나갑니다.
+지문은 점선을 절대 넘지 않습니다. 넘을 수 있는 것은 둘이고 각각 직접 골라야만 넘습니다 — 녹음 파일(`stt_backend: soniox`)과 전사본(클라우드 정리 백엔드). 정리 백엔드가 받는 것은 전사본, 녹음 제목과 시각, 화자 통계, 그리고 팩이 매칭되면 그 배경지식이며, 녹음 파일이나 음성 지문은 절대 받지 않습니다. `soniox` + `none` 조합이면 녹음은 나가고 전사본은 안 나가며, `mlx` + `ollama`면 아무것도 안 나갑니다.
 
 ## 기능 구분
 
@@ -33,7 +35,7 @@ flowchart TD
 |---|---|
 | **화자분리** | 누가 언제 말했는지 나눕니다 (`SPEAKER_00`, `SPEAKER_01` …) |
 | **음성 지문** | 누가 누군지 한 번만 확정하면, 다음 녹음부터 그 사람 이름이 자동으로 붙습니다 |
-| **요약** | 모든 녹음에 요약 형식 하나. 참석자, 발화 비중, 주요 내용, 그리고 있을 때만 결정사항과 할 일 |
+| **요약** | 모든 녹음에 요약 형식 하나. 참석자, 발화 비중, 주요 내용, 그리고 있을 때만 결정사항과 할 일. 정리 백엔드가 필요합니다: 기본은 Claude Code(전사본이 Anthropic으로 전송), 또는 Ollama(로컬), 또는 `none`(화자분리 전사본만, 요약 없음) |
 
 **선택: 직접 켜기 전에는 꺼져 있고, 핵심 기능은 이것들 없이 돌아갑니다.**
 
@@ -41,7 +43,7 @@ flowchart TD
 |---|---|---|
 | 클라우드 전사 | 로컬 whisper 대신 Soniox (녹음 파일을 업로드합니다) | [docs/setup-soniox.md](docs/setup-soniox.md) |
 | 배경지식 팩 | 반복 모임의 참가자 명단과 이어지는 맥락을 요약 프롬프트에 추가 | [docs/packs.md](docs/packs.md) |
-| 소속 태그 | 지문 매칭이 다른 모임 사람에게서 나왔을 때 로그 한 줄 | 아래 "누가 누군지 알려주기" |
+| 소속 태그 | 지문 매칭이 다른 모임 사람에게서 나왔을 때 로그 한 줄 | 아래 "누가 누군지 가르치기" |
 | 라벨 검증 | 완성된 전사를 지문과 교차 확인 | [docs/speaker-verification.md](docs/speaker-verification.md) |
 | 백그라운드 상주 | launchd / systemd / 작업 스케줄러 템플릿 | [docs/deployment.md](docs/deployment.md) |
 
@@ -82,58 +84,122 @@ pyannote·speechbrain은 PyTorch라 어디서든 돌고(CUDA·MPS·CPU), 폴더 
 
 ## 설치
 
-요구사항: Python 3.11+, [ffmpeg](https://ffmpeg.org) (`brew install ffmpeg` / `winget install ffmpeg` / `apt install ffmpeg`).
+Python 3.11, 3.12 또는 3.13, `git`, [ffmpeg](https://ffmpeg.org)(`ffmpeg`와 `ffprobe`가 함께 설치됩니다)가 필요합니다. 아래 블록은 모두 아무것도 없는 상태에서 시작하며, 먼저 가상환경을 만듭니다. 따라서 `moim-scribe` 명령은 그 가상환경이 활성화된 동안에만 있습니다(새 터미널을 열 때마다 다시 활성화하세요). Apple Silicon 맥은 `[mlx]`, 그 외에는 모두 `[cross]`를 씁니다.
+
+**미리 알아둘 것.** 설치에는 몇 분이 걸리고 가상환경에 디스크 약 1.6 GB가 듭니다(Apple Silicon, Python 3.12 실측: 134초). 첫 녹음을 처리할 때 모델 약 1.6 GB를 한 번 내려받고(실측 약 3분), 첫 `enroll`에서는 화자 모델(약 170 MB)을 내려받습니다. 첫 `doctor`는 무거운 패키지를 불러오느라 최대 1분 동안 아무 출력 없이 멈춰 있을 수 있습니다.
+
+**macOS, Apple Silicon**
 
 ```bash
-# macOS Apple Silicon
+brew install git ffmpeg
+python3 -m venv ~/moim-scribe-env
+source ~/moim-scribe-env/bin/activate
 pip install "moim-scribe[mlx] @ git+https://github.com/kemy-ai/moim-scribe"
-
-# Windows / Linux / Intel 맥
-pip install "moim-scribe[cross] @ git+https://github.com/kemy-ai/moim-scribe"
+moim-scribe --version
 ```
 
-최초 1회: pyannote 화자분리 모델은 gated라서 무료 Hugging Face 토큰 발급 + 모델 약관 동의가 필요합니다. 2분이면 됩니다: [docs/setup-pyannote.md](docs/setup-pyannote.md)
+**macOS, Intel**
+
+```bash
+brew install git ffmpeg
+python3 -m venv ~/moim-scribe-env
+source ~/moim-scribe-env/bin/activate
+pip install "moim-scribe[cross] @ git+https://github.com/kemy-ai/moim-scribe"
+moim-scribe --version
+```
+
+**Windows (PowerShell)**
+
+```powershell
+winget install Git.Git
+winget install Gyan.FFmpeg
+py -m venv $HOME\moim-scribe-env
+& $HOME\moim-scribe-env\Scripts\Activate.ps1
+pip install "moim-scribe[cross] @ git+https://github.com/kemy-ai/moim-scribe"
+moim-scribe --version
+```
+
+winget으로 설치한 뒤에는 `git`과 `ffmpeg`가 PATH에 잡히도록 PowerShell 창을 새로 여세요.
+
+**Linux (Debian / Ubuntu 예시, 다른 배포판은 해당 패키지 관리자 사용)**
+
+```bash
+sudo apt install git ffmpeg python3-venv
+python3 -m venv ~/moim-scribe-env
+source ~/moim-scribe-env/bin/activate
+pip install "moim-scribe[cross] @ git+https://github.com/kemy-ai/moim-scribe"
+moim-scribe --version
+```
+
+최초 1회: pyannote 화자분리 모델은 gated라서 무료 Hugging Face 토큰을 발급하고 모델 페이지 세 곳의 약관에 동의해야 합니다. 몇 분이면 됩니다: [docs/setup-pyannote.md](docs/setup-pyannote.md). `stt_backend: soniox`에서는 필요 없습니다.
 
 ## 빠른 시작
 
+가상환경을 활성화한 상태에서:
+
 ```bash
-moim-scribe init ~/MyMeetings          # 워크스페이스 생성 (기본 한국어)
-# HF 토큰 저장:
-echo "hf_..." > ~/MyMeetings/.hf_token
-
-moim-scribe doctor ~/MyMeetings        # ffmpeg·백엔드·토큰 점검
-
-# inbox에 녹음 넣기 (어떤 종류의 녹음이든):
-cp 녹음.m4a ~/MyMeetings/inbox/
-
-moim-scribe watch ~/MyMeetings         # 1회만 돌리려면 scan-inbox
+moim-scribe init ~/MyMeetings          # 워크스페이스 생성 (기본 언어: 한국어, 영어는 --language en)
+cd ~/MyMeetings
 ```
+
+HF 토큰을 워크스페이스에 저장한 뒤 설정을 점검합니다. macOS / Linux:
+
+```bash
+echo "hf_..." > .hf_token
+```
+
+Windows PowerShell (거기서 `echo ... >`는 UTF-16으로 쓰므로 아래처럼 하세요):
+
+```powershell
+Set-Content -Path .hf_token -Value "hf_..." -Encoding ascii
+```
+
+```bash
+moim-scribe doctor --online
+```
+
+`doctor`는 ffmpeg·백엔드 패키지·토큰을 점검하고, 내 녹음과 전사본이 어디로 가는지 출력합니다. `--online`을 붙이면 Hugging Face에 토큰이 gated 모델 페이지 세 곳을 각각 열 수 있는지 물어보고, 아직 "Agree and access repository"가 필요한 페이지를 알려 줍니다. `--online` 없이는 네트워크를 쓰지 않습니다.
+
+그다음 inbox에 녹음을 넣고(어떤 종류의 녹음이든) 감시를 시작합니다:
+
+```bash
+cp 녹음.m4a inbox/
+moim-scribe watch
+```
+
+1회만 돌리려면 `watch` 대신 `moim-scribe scan-inbox`를 쓰세요. 명령은 워크스페이스 폴더를 인자로 받거나, 그 폴더 안에서 실행하면 현재 폴더를 씁니다. `init`을 제외한 모든 명령은 `config.yaml`이 없는 폴더를 거부합니다.
 
 결과는 `results/`에 `YYMMDD_제목_summary.md` + 전체 전사본으로 저장됩니다. 전사본만 필요하면 `summarizer: none`으로 두세요. 추측을 없애는 팁 두 가지:
 
-- 파일명에 인원수를 넣기 — `북클럽 5명.m4a`
+- 파일명의 단어 끝에 인원수를 넣기 — `북클럽 5명.m4a`(언어 `ko`) 또는 `standup 4p.m4a`(그 외 언어)
 - 또는 녹음 시작할 때 말하기 — "참석자 다섯 명입니다"
 
+파일명의 인원수는 다음 형태만 인식합니다. `language: ko`에서는 한두 자리 숫자 뒤에 `명` 또는 `인`이 오고(`5명`, `3인`) 그 뒤에 한글이 이어지지 않는 경우, 그 외 언어에서는 숫자 뒤에 `p`, `ppl`, `people`, `speakers`가 단어로 오는 경우(`4p`, `4 people`, `4 speakers`)입니다. 1부터 30까지만 인정합니다. `1103` 같은 날짜, 연도, `3인칭`이나 `인터뷰` 같은 낱말은 인원수로 읽지 않고, 인원수가 없는 제목은 그대로 둡니다.
+
+설정이 덜 끝났을 때(토큰 없음, ffmpeg 없음, 백엔드 패키지 누락, 요약 도구 없음) `watch`, `scan-inbox`, `process`는 무엇이 빠졌는지 알려 주고 모든 녹음을 제자리에 그대로 둡니다. 설정이 끝나기 전에는 어떤 파일도 가져가거나 옮기지 않습니다. `scan-inbox`는 설정 문제가 있거나 녹음 처리가 실패하면 종료 코드 1로 끝납니다.
+
 ## 누가 누군지 가르치기
+
+예시는 `weekly sync 2p.m4a`로 저장한 녹음 하나를 씁니다. 처리가 끝나면 `ls results`와 `ls inbox/_done`으로 실제 이름을 확인하세요. 결과물에는 인원수 표기를 뺀 제목이 쓰이고(`results/YYMMDD_weekly sync_diarized.jsonl`, `..._transcript.txt`, `..._summary.md`), `inbox/_done/`의 원본 파일들은 전체 이름을 유지합니다(`weekly sync 2p.m4a`, `weekly sync 2p_transcript_diarized.txt`, `weekly sync 2p_speakers.json`). 이름에 공백이 있으면 따옴표로 감싸야 합니다. 아래는 워크스페이스 폴더 안에서 실행합니다:
 
 ```bash
 # 첫 회차 처리 후, 라벨→이름 매핑을 한 번만.
 # enroll 이 읽는 것은 .jsonl 입니다(구간 start/end 가 거기에만 있음) — 그 파일은
-# results/ 에 남습니다. 원본 오디오는 inbox/_done/ 으로 들어갑니다:
-moim-scribe enroll inbox/_done/녹음.m4a results/YYMMDD_녹음_diarized.jsonl \
-    SPEAKER_00=김하늘 SPEAKER_02=이바다 --workspace ~/MyMeetings
+# results/ 에 남고, 원본 오디오는 inbox/_done/ 에 있습니다. YYMMDD 는 실제 파일명의 날짜로 바꾸세요:
+moim-scribe enroll "inbox/_done/weekly sync 2p.m4a" "results/YYMMDD_weekly sync_diarized.jsonl" SPEAKER_00=김하늘 SPEAKER_02=이바다
 
 # 선택: 누가 어느 모임 사람인지 태그. 모임 이름은 팩 이름을 그대로 씁니다.
 # --attends-all 은 모든 녹음에 나오는 사람(보통 본인)용입니다.
-moim-scribe enroll … SPEAKER_00=김하늘 --group book-club --workspace ~/MyMeetings
-moim-scribe enroll … SPEAKER_01=박구름 --attends-all --workspace ~/MyMeetings
+moim-scribe enroll "inbox/_done/weekly sync 2p.m4a" "results/YYMMDD_weekly sync_diarized.jsonl" SPEAKER_00=김하늘 --group book-club
+moim-scribe enroll "inbox/_done/weekly sync 2p.m4a" "results/YYMMDD_weekly sync_diarized.jsonl" SPEAKER_01=박구름 --attends-all
 
-moim-scribe speakers ~/MyMeetings      # 축적된 지문과 소속 확인
+moim-scribe speakers      # 축적된 지문과 소속 확인
 
-# 이후 회차부터 자동 식별. 완성 전사는 언제든 검증(이쪽이 읽는 것은 .txt):
-moim-scribe verify inbox/_done/녹음.m4a inbox/_done/녹음_transcript_diarized.txt \
-    --expected "김하늘,이바다,박구름" --workspace ~/MyMeetings
+# 다음 녹음부터 그 사람들은 자동으로 식별됩니다. 완성 전사는 언제든 검증(이쪽이 읽는 것은 .txt):
+moim-scribe verify "inbox/_done/weekly sync 2p.m4a" "inbox/_done/weekly sync 2p_transcript_diarized.txt" --expected "김하늘,이바다,박구름"
 ```
+
+등록에 쓴 바로 그 녹음을 `verify`하면 라벨은 여전히 `SPEAKER_NN`으로 나옵니다. 등록은 그 전사본을 고쳐 쓰지 않으며, 이름은 다음 녹음부터 붙습니다.
 
 지문 DB를 믿을 수 있게 유지하는 규칙(사람이 확정한 구간만 등록 등)은 [docs/speaker-verification.md](docs/speaker-verification.md)에 있습니다.
 
@@ -142,9 +208,9 @@ moim-scribe verify inbox/_done/녹음.m4a inbox/_done/녹음_transcript_diarized
 - **한 녹음의 두 라벨에 같은 이름.** 대개 다른 실행의 라벨 번호를 옮겨 적은 경우입니다. 정말 한 사람이 두 라벨로 갈린 것이면 `--allow-duplicate`를 붙입니다.
 - **그 사람의 기존 지문과 유사도 0.5 미만인 목소리.** 직접 들어 본 뒤 `--force`를 붙입니다. 0.5는 안전선이 아닙니다. 같은 사람도 전화 음질이거나 지문이 얇으면 더 낮게 나올 수 있습니다.
 
-같은 명령의 나머지 사람은 그대로 등록되고, 하나라도 거부되면 명령은 종료 코드 1로 끝납니다.
+jsonl에 없는 라벨도 거부됩니다. 같은 명령의 나머지 사람은 그대로 등록되고, 하나라도 거부되면 명령은 종료 코드 1로 끝납니다.
 
-같은 이름이 반복되어도("독서모임.m4a"가 매주) 덮어쓰지 않습니다. 두 번째는 `inbox/_done/`에 `독서모임 (2).m4a`로 보관되고, 같은 날이면 결과도 `YYMMDD_독서모임 (2)_…`로 저장됩니다. `enroll`·`verify`에는 로그에 찍힌 이름을 쓰세요.
+같은 이름이 반복되어도("weekly sync.m4a"가 매주) 덮어쓰지 않습니다. 두 번째는 `inbox/_done/`에 `weekly sync (2).m4a`로 보관되고, 같은 날이면 결과도 `YYMMDD_weekly sync (2)_…`로 저장됩니다. `enroll`·`verify`에는 로그에 찍힌 이름이나 `ls`로 확인한 이름을 쓰세요.
 
 **소속 태그는 힌트이지 규칙이 아닙니다.** 지문은 등록된 전원과 대조되므로, DB가 커질수록 다른 모임 사람이 매칭 1위가 되는 일이 생깁니다. 그럴 때 실행 로그에 "누가·어느 모임에서" 한 줄이 남고, **그 외에는 아무것도 바뀌지 않습니다.** 차단하는 설계는 실측 후 버렸습니다 — 두 번째 모임에 가입하거나 게스트로 참석하는 일이 실제로 있고, 점수 구간이 겹치며, 아무도 갱신을 기억 못 한 태그가 맞는 매칭을 조용히 미상으로 만들기 때문입니다. 태그 없는 화자·팩이 안 잡힌 녹음·`--attends-all` 표시된 사람은 검사에서 제외됩니다.
 
@@ -157,17 +223,17 @@ moim-scribe verify inbox/_done/녹음.m4a inbox/_done/녹음_transcript_diarized
 | `ollama` | 로컬 Ollama 실행 | 안 나감 — 이 단계에서 나가는 것 없음 |
 | `none` | 없음 | 안 나감 — 화자분리 전사까지만 |
 
-`claude_cli`는 CLI를 도구 없이, 그리고 내 Claude Code 개인 설정 없이 실행합니다(`--safe-mode --strict-mcp-config --tools=`). 전사본은 글로만 읽히고, 요약이 그 컴퓨터의 Claude Code 설정에 따라 달라지지 않습니다. 이 옵션을 모르는 옛 CLI에서도 경고와 함께 동작합니다.
+`claude_cli`는 CLI를 도구 없이, MCP 서버 없이, 내 전역 지침과 사용자 설정 없이 실행하며, 빈 임시 폴더에서 돌립니다. 전사본은 글로만 읽히고, 요약이 그 컴퓨터의 Claude Code 설정에 따라 달라지지 않습니다. 요약은 전사본의 언어로 쓰입니다. 이 옵션들을 모르는 옛 버전의 Claude Code는 업데이트하거나 다른 정리 백엔드를 고르라는 안내와 함께 거부되며, 옵션 없이 다시 시도하지 않습니다.
 
-`config.yaml`에서 교체합니다. 요약 양식은 한국어·영어 둘 다 내장이고, 워크스페이스의 `packs/lenses/summary.<언어>.md`에 있습니다. 이 파일을 고치면 모든 요약의 형식이 바뀝니다. 이 표는 **전사본**에 대한 것이고, **녹음 파일**이 나가는지는 위의 `stt` 선택이 결정합니다.
+`config.yaml`에서 교체합니다. 요약 양식은 한국어·영어 둘 다 내장이고, 워크스페이스의 `packs/lenses/summary.<언어>.md`에 있습니다. 이 파일을 고치면 모든 요약의 형식이 바뀝니다. 이 표는 **전사본**에 대한 것이고, **녹음 파일**이 나가는지는 위의 `stt_backend` 선택이 결정합니다.
 
 ## 프라이버시와 동의 — 꼭 읽어주세요
 
 음성 지문은 **생체정보(민감 개인정보)**이고, 녹음에는 사적 대화가 담깁니다.
 
 - **녹음과 지문 등록은 모든 참가자의 동의를 받고 하세요.** 여러 나라에서 이것은 매너가 아니라 법적 요건입니다 — 한국 개인정보보호법상 개인을 식별하는 음성 특징 정보는 민감정보(생체인식정보)로 별도의 명시적 동의가 필요합니다.
-- 지문화는 항상 로컬이고, 최초 모델 다운로드 후에는 그 단계가 강제 오프라인으로 동작합니다. 네트워크에 닿을 수 있는 단계는 둘이며 직접 그렇게 설정했을 때만 그렇습니다 — `stt: soniox`는 **녹음 파일**을, 클라우드 정리 백엔드는 **전사본**을 보냅니다. 기본 설정은 녹음을 내보내지 않습니다.
-- 지문(`speakers/`)·녹음·명단은 리포 밖 워크스페이스에 있고, `init`이 방어용 `.gitignore`까지 깔아줍니다. 워크스페이스를 공개 저장소에 올리지 마세요.
+- 지문화는 항상 로컬이고, 최초 모델 다운로드 후에는 그 단계가 강제 오프라인으로 동작합니다. 네트워크에 닿을 수 있는 단계는 둘이며 직접 그렇게 설정했을 때만 그렇습니다 — `stt_backend: soniox`는 **녹음 파일**을, 클라우드 정리 백엔드는 **전사본**(과 녹음 제목·시각, 화자 통계, 팩이 매칭되면 그 배경지식)을 보냅니다. 기본 설정은 녹음을 내보내지 않습니다.
+- 지문(`speakers/`)·녹음·명단은 리포 밖 워크스페이스에 있고, `init`이 방어용 `.gitignore`까지 깔아줍니다(`packs/`와 `glossary.txt`도 포함). 워크스페이스를 공개 저장소에 올리지 마세요.
 
 상세: [docs/privacy.md](docs/privacy.md)
 
@@ -175,20 +241,30 @@ moim-scribe verify inbox/_done/녹음.m4a inbox/_done/녹음_transcript_diarized
 
 launchd(macOS)·systemd(Linux)·작업 스케줄러(Windows) 템플릿: [docs/deployment.md](docs/deployment.md). iCloud Drive·구글드라이브·Dropbox 동기화 폴더를 inbox로 쓸 수 있습니다. 처리 전에 파일이 디코딩되는지, 그리고 macOS에서는 실제로 디스크에 내려와 있거나 끝까지 읽히는지 확인합니다. 내려받는 중인 파일은 처음부터 최종 크기를 보고하고 앞부분이 재생되므로, 크기와 디코딩 검사만으로는 덜 내려온 녹음이 통과합니다.
 
+## 문제가 생겼을 때
+
+- **설정 문제는 녹음을 건드리기 전에 멈춥니다.** 토큰 없음, ffmpeg 없음, 백엔드 패키지 누락, 요약 도구 없음: `watch` / `scan-inbox` / `process`는 무엇이 빠졌는지 출력하고 모든 녹음을 inbox에 그대로 둡니다. 고치면 다음 순회에서 처리됩니다. `watch`는 계속 돌면서 순회마다 다시 점검합니다.
+- **`inbox/_error/`** 에는 스스로 실패한 녹음이 들어갑니다(디코딩 불가, 파일명이 너무 긺, 중간에 멈춘 실행의 잔여물). 이유는 로그 한 줄에 있으니 고친 뒤 파일을 `inbox/`로 다시 옮기면 재시도됩니다.
+- **요약이 실패해도 전사본은 남습니다.** 화자분리 전사본은 요약을 시도하기 전에 `results/`에 먼저 쓰이므로, 정리 백엔드가 실패해도 전사본은 있습니다. 요약을 다시 시도하려면 녹음을 `inbox/`로 되돌리세요.
+- **`inbox/`에 남아 경고를 찍는 파일**은 아직 내려받는 중이거나 올바른 오디오 파일이 아닌 것입니다. 내려받는 중이 아니라면 `inbox/`에서 치우세요.
+- `scan-inbox`는 녹음이 실패했거나 설정이 덜 끝났으면 종료 코드 1로 끝나므로, 스케줄러가 알아챌 수 있습니다.
+
 ## 유지보수
 
 best-effort로 운영합니다: 이슈·PR은 읽지만 응답 기한은 보장하지 않습니다. 포크 환영합니다.
 
 ## 0.1에서 올리기
 
-0.2에서 녹음 유형이 없어졌습니다. 기존 워크스페이스에서 달라지는 것:
+0.2에서 녹음 유형이 없어졌지만, 직접 선택하기 전에는 어떤 파일이 처리되고 요약되는지가 업그레이드로 달라지지 않습니다:
 
-- **폴더.** 녹음을 `inbox/meeting/`, `inbox/gathering/`, `inbox/transcript/`로 나눠 넣을 필요가 없습니다. 그 폴더들은 계속 동작하지만(`inbox/` 바로 아래 하위 폴더는 계속 훑습니다) 더는 아무 차이도 만들지 않습니다.
-- **`config.yaml`의 `types:`** 는 더 이상 렌즈를 고르지 않으며, 로그에 그 사실이 한 줄 나옵니다. 한 가지는 계속 지켜집니다. `null`로 지정돼 있던 폴더(기본값은 `inbox/transcript/`)는 그 블록이 남아 있는 동안 전사 전용으로 유지되므로, 업그레이드했다고 그 전사본이 요약 백엔드로 나가기 시작하지 않습니다. 전체를 전사만 하려면 `summarizer: none`으로 두세요.
-- **렌즈.** `meeting`, `gathering`, `conversation`과 `packs/styles/`가 없어졌습니다. 할 일은 없습니다. `packs/lenses/summary.<언어>.md`가 없는 워크스페이스는 내장 양식을 씁니다. 고쳐 쓰려면 패키지의 `templates/lenses/`에서 그 파일을 `packs/lenses/`로 복사해 편집하세요. `packs/lenses/`에 남은 옛 렌즈 파일은 쓰이지 않으며 그대로 둬도 됩니다.
+- **`config.yaml`에 `types:` 블록이 남아 있으면** 0.1처럼 그 블록에 적힌 하위 폴더만 훑습니다. `inbox/` 바로 아래 파일이나 다른 하위 폴더는 훑지 않습니다. 폴더 이름은 대소문자와 유니코드 형태를 무시하고 비교합니다(`Private`는 `private`와 일치). `null`로 지정돼 있던 폴더(기본값은 `inbox/transcript/`)는 전사 전용으로 유지되므로, 그 전사본이 요약 백엔드로 나가기 시작하지 않습니다. 이 블록은 더 이상 렌즈를 고르지 않으며 로그에 그 사실이 한 줄 나옵니다. 블록이 있는 채로 `inbox/` 바로 아래나 다른 하위 폴더에 녹음이 있으면, 순회마다 그 개수와 해결책을 담은 경고가 한 줄 나옵니다. 해결책은 `config.yaml`에서 `types:` 블록을 지워 평평한 inbox를 쓰는 것입니다. 전체를 전사만 하려면 `summarizer: none`으로 두세요.
+- **`types:` 블록이 없으면**(새 0.2 워크스페이스이거나 블록을 지운 뒤) `inbox/`와 그 바로 아래 하위 폴더를 훑고, 녹음은 어디에 있든 똑같이 처리됩니다.
+- **렌즈.** `meeting`, `gathering`, `conversation`과 `packs/styles/`가 없어졌습니다. `moim-scribe init <워크스페이스>`를 다시 실행하세요. 빠진 렌즈 파일을 추가하고 `config.yaml`은 건드리지 않습니다. `packs/lenses/summary.<언어>.md`가 없는 워크스페이스는 그동안 내장 양식을 씁니다. `packs/lenses/`에 남은 옛 렌즈 파일은 쓰이지 않으며 그대로 둬도 됩니다.
 - **팩.** `match.json`의 `"type"`과 `"style"`은 무시됩니다. 제목 키워드만으로 매칭합니다.
 - **파일명.** 요약은 이제 `YYMMDD_제목_summary.md`입니다.
-- **`moim-scribe process`** 에 `--type`이 필요 없습니다(넣어도 무시됩니다).
+- **`moim-scribe process`** 에 `--type`이 필요 없습니다(넣어도 무시됩니다). 비공개 사본으로 작업하며, 워크스페이스 `inbox/` 안의 파일은 거부합니다.
+- **`init`은 다시 실행해도 안전합니다.** `config.yaml`을 덮어쓰지 않고, 빠진 렌즈 파일과 `.gitignore` 항목만 추가하며, `--force`는 이제 아무 일도 하지 않습니다. `--reset-config`는 옛 파일을 `config.yaml.bak`으로 저장한 뒤 새 설정을 씁니다.
+- **`config.yaml`은 불러올 때 검증됩니다.** 모르는 키는 알려 주고, 잘못된 값은 전사를 시작하기 전에 오류가 되며, `summarizer: null`은 `none`으로 읽고, `stt`는 `stt_backend`의 다른 표기로 받아들입니다.
 
 ## 로드맵 (v0.2 범위 밖)
 

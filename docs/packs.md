@@ -42,8 +42,9 @@ output cannot silently rewrite your source of truth.
 ## Changing what every summary looks like
 
 Edit `packs/lenses/summary.<language>.md` in your workspace. If the file is not
-there (a workspace created before 0.2), the built-in copy is used; copy it from
-the package's `templates/lenses/` to start from it.
+there (a workspace created before 0.2), the built-in copy is used. Run
+`moim-scribe init <workspace>` again: it adds any missing lens files and never
+touches `config.yaml`, so you can then edit the copy it created.
 
 If you rename the Decisions / Action items / Open items headings, round cards
 stop collecting those sections: they are harvested by heading.

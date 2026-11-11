@@ -23,25 +23,36 @@ single most common place setups fail — do these four steps in order.
 4. Give the token to moim-scribe (either way works):
 
 ```bash
-# option A — a file in your workspace (created by `moim-scribe init`)
+# option A — a file in your workspace (macOS / Linux)
 echo "hf_xxxxxxxxxxxx" > ~/MyMeetings/.hf_token
+# Windows PowerShell (echo ... > writes UTF-16 there):
+#   Set-Content -Path $HOME\MyMeetings\.hf_token -Value "hf_xxxxxxxxxxxx" -Encoding ascii
 
 # option B — environment variable
 export HF_TOKEN=hf_xxxxxxxxxxxx        # Windows PowerShell: $env:HF_TOKEN="hf_..."
 ```
 
-Then check:
+Then check (run it inside the workspace, or pass its path):
 
 ```bash
-moim-scribe doctor ~/MyMeetings
+moim-scribe doctor --online ~/MyMeetings
 ```
+
+`doctor` also prints where your audio and transcript go. `--online` is the only
+part that uses the network.
 
 ## Troubleshooting
 
 - **401 / "gated repo" errors during the first run** — step 2 was skipped for
-  one of the two models, or the token belongs to a different account.
+  one of the three models, or the token belongs to a different account. Run
+  `moim-scribe doctor --online`: it asks Hugging Face whether your token can
+  open each of the three pages and names the one that still needs "Agree and
+  access repository". If it prints "could not check", the network or
+  `huggingface_hub` was unavailable; that is not a verdict on the token.
 - **It downloads every run** — the models cache under your Hugging Face cache
   directory; if that gets wiped (CI containers, cleanup tools), downloads recur.
 - The speaker-fingerprint model (speechbrain ECAPA) is **not** gated and needs
-  no token; it caches into `<workspace>/models/` and afterwards runs offline
-  by design (fingerprinting never touches the network once cached).
+  no token. It is copied into `<workspace>/models/` as real files (not links
+  into the Hugging Face cache), so the workspace keeps working offline even
+  after the cache is cleared, and fingerprinting never touches the network once
+  it is there. The first `enroll` downloads it (about 170 MB).

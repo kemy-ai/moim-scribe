@@ -45,14 +45,18 @@ can name speakers automatically — is everyone OK with that?"
   Fingerprinting is always local: after the first model download that model is
   forced offline (`HF_HUB_OFFLINE`), so matching voices never touches the
   network. Two other steps can, and neither does unless you configure it:
-  - `stt: soniox` uploads the **audio itself** to Soniox for transcription.
+  - `stt_backend: soniox` uploads the **audio itself** to Soniox for transcription.
     moim-scribe deletes the uploaded file and the transcription when it
     finishes, and logs what to delete by hand if that fails — but the
     recording was on a third party's servers in the meantime, and their
     retention is governed by their terms, not this tool's. The default
     backends (`mlx`, `faster`) keep the audio on your machine.
-  - `claude_cli` / `anthropic_api` send the **transcript** to Anthropic.
-    `ollama` / `none` do not.
+  - `claude_cli` / `anthropic_api` send the **transcript** to Anthropic. The
+    prompt holds the transcript, the recording's title and time, the speaker
+    statistics, and your pack background when a pack matches; never the audio
+    and never a fingerprint. `ollama` / `none` do not send it to Anthropic.
+    (`ollama` stays on your machine unless `OLLAMA_HOST` points at another
+    server; `moim-scribe doctor` prints where the audio and the transcript go.)
 
   These are independent, so state them separately when you ask for consent:
   "the recording is uploaded for transcription" is a different thing to agree
@@ -61,7 +65,13 @@ can name speakers automatically — is everyone OK with that?"
 - **Workspace separation.** All personal data (fingerprints in `speakers/`,
   recordings in `inbox/`, rosters in `packs/`) lives in a folder you chose,
   outside any git repository, and `moim-scribe init` writes a defensive
-  `.gitignore` into the workspace in case one is ever created there.
+  `.gitignore` into the workspace in case one is ever created there (it
+  ignores speakers, recordings, models, `packs/`, `glossary.txt` and the
+  token files). Running `init` again adds any entry an older workspace lacks.
+- **The speaker model is a real copy.** `<workspace>/models/` holds the speaker
+  model as ordinary files, not links into the Hugging Face cache, so the
+  workspace keeps working offline after the cache is cleared. The gated
+  pyannote models stay in the Hugging Face cache.
 - **Deletion is simple.** Delete `<workspace>/speakers/<name>.npy` and the
   person's entry in `speakers/index.json` to forget a voice; delete the
   workspace to forget everything.

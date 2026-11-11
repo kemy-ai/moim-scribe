@@ -2,6 +2,8 @@
 
 **A local-first voice pipeline built for recurring meetings — the more often the same people meet, the more accurate it gets.**
 
+By default the summary step sends the transcript to Anthropic through Claude Code. Set `summarizer: ollama` or `summarizer: none` and everything stays on your machine.
+
 *moim* (모임) is Korean for a small recurring gathering — a book club, a writing circle, a weekly team sync. moim-scribe watches a folder, and when a recording lands in it: transcribes (whisper) → separates speakers (pyannote) → **matches voices against a fingerprint database that grows with every session** → writes a summary. It does not ask what kind of recording it is: a meeting, a call and a book club all go into the same folder and come out in the same format. Voice fingerprints are always local. Two steps are yours to choose: transcription runs on your machine by default and can instead go to Soniox, and summarization can be local (Ollama, or none) or a cloud LLM (Claude).
 
 > **Consent first.** moim-scribe is built for groups that record themselves with everyone's informed consent. Voice fingerprints are biometric data — never use this tool to record or identify people covertly. **This bites hardest in private relationships**: a conversation with a partner or a family member is where one side is most tempted to record without saying so, and precisely where you must not. In many jurisdictions that is illegal, not just impolite: [docs/privacy.md](docs/privacy.md).
@@ -19,11 +21,11 @@ flowchart TD
         C --> D["results/<br>summary md + diarized transcript"]
         V["enroll · verify commands"] -.-> FP
     end
-    B -.->|"the audio itself, and only<br>with stt: soniox"| STT["Soniox<br>cloud STT"]
-    C -.->|"transcript only, and only with a cloud<br>backend (claude_cli · anthropic_api)"| LLM["cloud LLM"]
+    B -.->|"the audio itself, and only<br>with stt_backend: soniox"| STT["Soniox<br>cloud STT"]
+    C -.->|"the transcript and a few facts, and only with a<br>cloud backend (claude_cli · anthropic_api)"| LLM["cloud LLM"]
 ```
 
-Fingerprints never cross the dashed line. Two things can, each only if you choose it: the audio (`stt: soniox`) and the transcript (a cloud summarizer). With the defaults changed to `soniox` + `none`, the recording leaves and the transcript does not; with `mlx` + `ollama`, nothing leaves at all.
+Fingerprints never cross the dashed line. Two things can, each only if you choose it: the audio (`stt_backend: soniox`) and the transcript (a cloud summarizer). What the summarizer receives is the transcript, the recording's title and time, the speaker statistics, and your pack background when a pack matches; never the audio and never a fingerprint. With the defaults changed to `soniox` + `none`, the recording leaves and the transcript does not; with `mlx` + `ollama`, nothing leaves at all.
 
 ## What is in the box
 
@@ -33,7 +35,7 @@ Fingerprints never cross the dashed line. Two things can, each only if you choos
 |---|---|
 | **Speaker separation** | splits the recording by who spoke when (`SPEAKER_00`, `SPEAKER_01` …) |
 | **Voice fingerprints** | you confirm who is who once; from the next recording on, those people are named automatically |
-| **Summary** | one summary format for every recording, with attendees, talk share, what was discussed, decisions and action items when there are any |
+| **Summary** | one summary format for every recording, with attendees, talk share, what was discussed, decisions and action items when there are any. Needs a summarizer: Claude Code by default (sends the transcript to Anthropic), or Ollama (local), or `none` (diarized transcripts only, no summary) |
 
 **Optional: off until you set it up, and the core does not depend on any of it.**
 
@@ -41,7 +43,7 @@ Fingerprints never cross the dashed line. Two things can, each only if you choos
 |---|---|---|
 | Cloud transcription | Soniox instead of a local whisper model (uploads the audio) | [docs/setup-soniox.md](docs/setup-soniox.md) |
 | Background packs | a recurring group's roster and running context, added to the summary prompt | [docs/packs.md](docs/packs.md) |
-| Group tags | a log line when a voice match comes from a different group | "Teaching it who's who" below |
+| Group tags | a log line when a voice match comes from a different group | "Teaching it who is who" below |
 | Label verification | cross-check a finished transcript against fingerprints | [docs/speaker-verification.md](docs/speaker-verification.md) |
 | Background service | launchd / systemd / Task Scheduler templates | [docs/deployment.md](docs/deployment.md) |
 
@@ -82,58 +84,122 @@ Setup and the quota you have to manage: [docs/setup-soniox.md](docs/setup-soniox
 
 ## Install
 
-Requirements: Python 3.11+, [ffmpeg](https://ffmpeg.org) on PATH (`brew install ffmpeg` / `winget install ffmpeg` / `apt install ffmpeg`).
+You need Python 3.11, 3.12 or 3.13, `git`, and [ffmpeg](https://ffmpeg.org) (it provides `ffmpeg` and `ffprobe`). Each block below starts from nothing: it creates a virtual environment first, so the `moim-scribe` command exists only while that environment is active (activate it again in every new terminal). Use `[mlx]` on an Apple Silicon Mac and `[cross]` everywhere else.
+
+**What to expect.** Installing takes a couple of minutes and about 1.6 GB of disk for the virtual environment (measured on Apple Silicon with Python 3.12: 134 s). The first recording downloads about 1.6 GB of models once (measured: about 3 minutes), and the first `enroll` downloads the speaker model (about 170 MB). The first `doctor` can sit silent for up to a minute while it imports the heavy packages.
+
+**macOS, Apple Silicon**
 
 ```bash
-# macOS Apple Silicon
+brew install git ffmpeg
+python3 -m venv ~/moim-scribe-env
+source ~/moim-scribe-env/bin/activate
 pip install "moim-scribe[mlx] @ git+https://github.com/kemy-ai/moim-scribe"
-
-# Windows / Linux / Intel Mac
-pip install "moim-scribe[cross] @ git+https://github.com/kemy-ai/moim-scribe"
+moim-scribe --version
 ```
 
-One-time: pyannote's diarization model is gated — create a free Hugging Face token and accept the model terms. Takes two minutes: [docs/setup-pyannote.md](docs/setup-pyannote.md).
+**macOS, Intel**
+
+```bash
+brew install git ffmpeg
+python3 -m venv ~/moim-scribe-env
+source ~/moim-scribe-env/bin/activate
+pip install "moim-scribe[cross] @ git+https://github.com/kemy-ai/moim-scribe"
+moim-scribe --version
+```
+
+**Windows (PowerShell)**
+
+```powershell
+winget install Git.Git
+winget install Gyan.FFmpeg
+py -m venv $HOME\moim-scribe-env
+& $HOME\moim-scribe-env\Scripts\Activate.ps1
+pip install "moim-scribe[cross] @ git+https://github.com/kemy-ai/moim-scribe"
+moim-scribe --version
+```
+
+Open a new PowerShell window after the winget installs so `git` and `ffmpeg` are on PATH.
+
+**Linux (Debian / Ubuntu shown; use your package manager)**
+
+```bash
+sudo apt install git ffmpeg python3-venv
+python3 -m venv ~/moim-scribe-env
+source ~/moim-scribe-env/bin/activate
+pip install "moim-scribe[cross] @ git+https://github.com/kemy-ai/moim-scribe"
+moim-scribe --version
+```
+
+One-time: pyannote's diarization model is gated, so you need a free Hugging Face token and you must accept the terms of three model pages. It takes a few minutes: [docs/setup-pyannote.md](docs/setup-pyannote.md). Not needed with `stt_backend: soniox`.
 
 ## Quickstart
 
+With the virtual environment active:
+
 ```bash
-moim-scribe init ~/MyMeetings          # creates the workspace (add --language en)
-# save your HF token:
-echo "hf_..." > ~/MyMeetings/.hf_token
-
-moim-scribe doctor ~/MyMeetings        # checks ffmpeg, backends, token
-
-# drop a recording into the inbox (any kind of recording):
-cp recording.m4a ~/MyMeetings/inbox/
-
-moim-scribe watch ~/MyMeetings         # or scan-inbox for a single pass
+moim-scribe init ~/MyMeetings --language en   # creates the workspace (default language: ko)
+cd ~/MyMeetings
 ```
+
+Save your Hugging Face token into the workspace, then check the setup. macOS / Linux:
+
+```bash
+echo "hf_..." > .hf_token
+```
+
+Windows PowerShell (`echo ... >` writes UTF-16 there; this does not):
+
+```powershell
+Set-Content -Path .hf_token -Value "hf_..." -Encoding ascii
+```
+
+```bash
+moim-scribe doctor --online
+```
+
+`doctor` checks ffmpeg, the backend packages and the token, and prints where your audio and your transcript will go. With `--online` it also asks Hugging Face whether your token can open each of the three gated model pages, and names the page that still needs "Agree and access repository". Without `--online` it never touches the network.
+
+Then drop a recording into the inbox (any kind of recording) and start the watcher:
+
+```bash
+cp recording.m4a inbox/
+moim-scribe watch
+```
+
+Use `moim-scribe scan-inbox` instead of `watch` for a single pass. Commands take the workspace folder as an argument, or use the current folder when you run them inside it. Every command except `init` refuses a folder that has no `config.yaml`.
 
 Results land in `results/` as `YYMMDD_title_summary.md` plus the full diarized transcript. Want transcripts only? Set `summarizer: none`. Tips that remove guesswork:
 
-- put the attendee count in the filename — `book club 5명.m4a` / `standup 4p.m4a`
+- put the attendee count at the end of a word in the filename: `book club 5명.m4a` (language `ko`) or `standup 4p.m4a` (other languages)
 - or say it at the start of the recording ("참석자 다섯 명입니다" / "five participants today")
 
-## Teaching it who's who
+The filename count is recognized only in these forms: with `language: ko`, a number of one or two digits followed by `명` or `인` (`5명`, `3인`) that is not followed by another Korean syllable; with any other language, a number followed by `p`, `ppl`, `people` or `speakers` as a whole word (`4p`, `4 people`, `4 speakers`). Only 1 to 30 counts. A date such as `1103`, a year, or a word such as `3인칭` or `인터뷰` is not read as a count, and a title that holds no count is left untouched.
+
+If setup is incomplete (no token, no ffmpeg, a missing backend package, no summarizer tool), `watch`, `scan-inbox` and `process` say what is missing and leave every recording where it is; nothing is claimed or moved until the setup is complete. `scan-inbox` exits with status 1 on a setup problem or when a recording failed.
+
+## Teaching it who is who
+
+The examples use one recording, saved as `weekly sync 2p.m4a`. After it has been processed, find the real names with `ls results` and `ls inbox/_done`: the results carry the title without the count hint (`results/YYMMDD_weekly sync_diarized.jsonl`, `..._transcript.txt`, `..._summary.md`), while the original files in `inbox/_done/` keep the full name (`weekly sync 2p.m4a`, `weekly sync 2p_transcript_diarized.txt`, `weekly sync 2p_speakers.json`). Names with spaces need quotes. Run these from the workspace folder:
 
 ```bash
 # after the first processed session, map labels to names once.
-# enroll reads the .jsonl (segment start/end live only there) and that file is
-# kept in results/; the original audio lands in inbox/_done/:
-moim-scribe enroll inbox/_done/rec.m4a results/YYMMDD_rec_diarized.jsonl \
-    SPEAKER_00="Kim Haneul" SPEAKER_02="Lee Bada" --workspace ~/MyMeetings
+# enroll reads the .jsonl (segment start/end live only there), kept in results/;
+# the original audio is in inbox/_done/. Replace YYMMDD with the date in the file name:
+moim-scribe enroll "inbox/_done/weekly sync 2p.m4a" "results/YYMMDD_weekly sync_diarized.jsonl" SPEAKER_00="Kim Haneul" SPEAKER_02="Lee Bada"
 
 # optional: say which group someone belongs to, using the pack name.
 # --attends-all is for whoever is in every recording (usually you).
-moim-scribe enroll … SPEAKER_00="Kim Haneul" --group book-club --workspace ~/MyMeetings
-moim-scribe enroll … SPEAKER_01="Park Gureum" --attends-all --workspace ~/MyMeetings
+moim-scribe enroll "inbox/_done/weekly sync 2p.m4a" "results/YYMMDD_weekly sync_diarized.jsonl" SPEAKER_00="Kim Haneul" --group book-club
+moim-scribe enroll "inbox/_done/weekly sync 2p.m4a" "results/YYMMDD_weekly sync_diarized.jsonl" SPEAKER_01="Park Gureum" --attends-all
 
-moim-scribe speakers ~/MyMeetings      # see accumulated fingerprints and their groups
+moim-scribe speakers      # see accumulated fingerprints and their groups
 
-# from now on those two are auto-identified; verify a finished transcript anytime (this one reads the .txt):
-moim-scribe verify inbox/_done/rec.m4a inbox/_done/rec_transcript_diarized.txt \
-    --expected "Kim Haneul,Lee Bada,Park Gureum" --workspace ~/MyMeetings
+# from the next recording on those people are named automatically; verify a finished transcript anytime (this one reads the .txt):
+moim-scribe verify "inbox/_done/weekly sync 2p.m4a" "inbox/_done/weekly sync 2p_transcript_diarized.txt" --expected "Kim Haneul,Lee Bada,Park Gureum"
 ```
+
+Verifying the very recording you enrolled from still shows `SPEAKER_NN` labels: enrollment does not rewrite that transcript, and names appear from the next recording on.
 
 Only enroll ranges a human has confirmed — the discipline that keeps the database trustworthy is in [docs/speaker-verification.md](docs/speaker-verification.md).
 
@@ -142,9 +208,9 @@ Only enroll ranges a human has confirmed — the discipline that keeps the datab
 - **One name on two labels of the same recording.** Usually a label number copied from a different run. If one person really was split into two labels, add `--allow-duplicate`.
 - **A voice that scores below 0.5 against that person's existing fingerprint.** Add `--force` after listening. 0.5 is not a safety line: the same person can score lower on phone audio or against a thin fingerprint.
 
-The others in the same command are still enrolled, and the command exits with status 1 when anything was refused.
+A label that is not in the jsonl is refused too. The others in the same command are still enrolled, and the command exits with status 1 when anything was refused.
 
-If a name repeats ("book club.m4a" every week), nothing is overwritten: the second one is kept as `book club (2).m4a` in `inbox/_done/`, and its results as `YYMMDD_book club (2)_…` when both land on the same day. Use the name the log printed when you run `enroll` or `verify`.
+If a name repeats ("weekly sync.m4a" every week), nothing is overwritten: the second one is kept as `weekly sync (2).m4a` in `inbox/_done/`, and its results as `YYMMDD_weekly sync (2)_…` when both land on the same day. Use the name the log printed, or `ls`, when you run `enroll` or `verify`.
 
 **Group tags are a hint, not a rule.** A fingerprint is compared against everyone enrolled, so as the database grows a name from another recurring group can win a match. When that happens the run logs a line naming who and from where — and changes nothing else. Blocking on it was measured and rejected: people do join a second group or visit as guests, the score ranges overlap, and a tag nobody remembered to update would silently turn a correct match into an unknown. Untagged speakers, unmatched recordings, and anyone marked `--attends-all` are skipped.
 
@@ -157,17 +223,17 @@ If a name repeats ("book club.m4a" every week), nothing is overwritten: the seco
 | `ollama` | Ollama running locally | no — nothing leaves at this step |
 | `none` | nothing | no — stops at the diarized transcript |
 
-With `claude_cli`, the CLI is started with no tools and without your own Claude Code customizations (`--safe-mode --strict-mcp-config --tools=`): the transcript is only ever read as text, and the summary does not depend on how that machine's Claude Code is set up. A CLI too old to know those flags still works, with a warning.
+With `claude_cli`, the CLI is started with no tools, no MCP servers, and neither your global instructions nor your user settings, and it runs from an empty temporary directory: the transcript is only ever read as text, and the summary does not depend on how that machine's Claude Code is set up. The summary is written in the language of the transcript. A Claude Code version too old for these flags is refused with a message to update it or choose another summarizer; it is not retried without them.
 
-Switch in `config.yaml`. The summary template ships in Korean and English (`--language`) and lives in your workspace at `packs/lenses/summary.<language>.md`; edit it to change what every summary looks like. This table is about the transcript only — whether the *audio* leaves is the separate `stt` choice above.
+Switch in `config.yaml`. The summary template ships in Korean and English (`--language`) and lives in your workspace at `packs/lenses/summary.<language>.md`; edit it to change what every summary looks like. This table is about the transcript only — whether the *audio* leaves is the separate `stt_backend` choice above.
 
 ## Privacy and consent — read this
 
 Voice fingerprints are **biometric personal data**, and recordings capture private conversation.
 
 - **Record and enroll only with every participant's consent.** In many jurisdictions this is a legal requirement, not a courtesy — e.g. under Korea's Personal Information Protection Act, voiceprints used to identify a person are sensitive biometric information requiring separate explicit consent.
-- Fingerprinting is always local, and after the first model download that step is forced offline. Two steps can reach the network, and only if you configure them to: `stt: soniox` uploads the **audio**, and a cloud summarizer sends the **transcript**. The defaults keep the audio home.
-- The workspace keeps fingerprints (`speakers/`), recordings, and rosters outside the repo, and `init` drops a defensive `.gitignore` in the workspace. Never publish a workspace.
+- Fingerprinting is always local, and after the first model download that step is forced offline. Two steps can reach the network, and only if you configure them to: `stt_backend: soniox` uploads the **audio**, and a cloud summarizer sends the **transcript** (with the recording title and time, speaker statistics, and your pack background when a pack matches). The defaults keep the audio home.
+- The workspace keeps fingerprints (`speakers/`), recordings, and rosters outside the repo, and `init` drops a defensive `.gitignore` in the workspace (it also covers `packs/` and `glossary.txt`). Never publish a workspace.
 
 Details: [docs/privacy.md](docs/privacy.md).
 
@@ -175,20 +241,30 @@ Details: [docs/privacy.md](docs/privacy.md).
 
 launchd (macOS), systemd (Linux), and Task Scheduler (Windows) templates: [docs/deployment.md](docs/deployment.md). Cloud-synced folders (iCloud Drive, Google Drive, Dropbox) work as the inbox: before touching a file the pipeline checks that it decodes and, on macOS, that it is physically on disk or reads back whole. A file that is still downloading reports its final size and plays from the start, so size and a decode probe alone let a partly downloaded recording through.
 
+## When something goes wrong
+
+- **Setup problems stop before touching your recordings.** No token, no ffmpeg, a missing backend package or a missing summarizer tool: `watch` / `scan-inbox` / `process` print what is missing and leave every recording in the inbox. Fix it and the next pass picks them up. `watch` keeps running and checks again each pass.
+- **`inbox/_error/`** holds a recording that failed on its own (it could not be decoded, the filename was too long, a leftover from a run that stopped halfway). Read the log line for the reason, fix it, and move the file back into `inbox/` to retry.
+- **A failed summary does not lose the transcript.** The diarized transcript is written to `results/` before the summary is attempted, so you keep it even when the summarizer failed. Move the recording back to `inbox/` to try the summary again.
+- **A file that stays in `inbox/` and logs a warning** is either still downloading or not a valid audio file. If it is not downloading, remove it from `inbox/`.
+- `scan-inbox` exits with status 1 when a recording failed or the setup is incomplete, so a scheduler can notice.
+
 ## Maintenance
 
 Best-effort: issues and PRs are read, response time is not guaranteed. Forks welcome.
 
 ## Upgrading from 0.1
 
-0.2 removes recording types. What that means for an existing workspace:
+0.2 removes recording types, but an upgrade changes nothing about which files are processed or summarized until you opt in:
 
-- **Folders.** Recordings no longer have to be sorted into `inbox/meeting/`, `inbox/gathering/` or `inbox/transcript/`. Those folders keep working (direct subfolders of `inbox/` are still scanned), but they no longer change anything.
-- **`types:` in `config.yaml`** no longer selects a lens, and a log line says so. One part of it is still honored: a folder it mapped to `null` (by default `inbox/transcript/`) stays transcript-only for as long as the block is there, so an upgrade never starts sending those transcripts to a summarizer. For transcripts only everywhere, set `summarizer: none`.
-- **Lenses.** `meeting`, `gathering` and `conversation` are gone, along with `packs/styles/`. Nothing needs to be done: a workspace with no `packs/lenses/summary.<language>.md` uses the built-in one. To customize it, copy the file from the package's `templates/lenses/` into `packs/lenses/` and edit it. Old lens files left in `packs/lenses/` are harmless and unused.
+- **If `config.yaml` still has a `types:` block**, exactly the subfolders it names are scanned, as in 0.1: not `inbox/` itself and not other subfolders. Folder names are compared ignoring case and Unicode form (`Private` matches `private`). A folder mapped to `null` (by default `inbox/transcript/`) stays transcript-only, so those transcripts never start going to a summarizer. The block no longer selects a lens, and a log line says so. If recordings sit in `inbox/` itself or in other subfolders while the block is there, every pass logs one warning with their count and the remedy: delete the `types:` block from `config.yaml` to use the flat inbox. For transcripts only everywhere, set `summarizer: none`.
+- **Without a `types:` block** (a new 0.2 workspace, or after you delete it), `inbox/` and its direct subfolders are scanned, and recordings are processed the same wherever they sit.
+- **Lenses.** `meeting`, `gathering` and `conversation` are gone, along with `packs/styles/`. Run `moim-scribe init <workspace>` again: it adds the missing lens files and never touches `config.yaml`. A workspace with no `packs/lenses/summary.<language>.md` uses the built-in one meanwhile. Old lens files left in `packs/lenses/` are harmless and unused.
 - **Packs.** `"type"` and `"style"` in `match.json` are ignored; the title keyword alone decides.
 - **File names.** Summaries are now `YYMMDD_title_summary.md`.
-- **`moim-scribe process`** no longer needs `--type` (it is accepted and ignored).
+- **`moim-scribe process`** no longer needs `--type` (it is accepted and ignored). It works on a private copy and refuses a file that is inside the workspace `inbox/`.
+- **`init` is safe to run again.** It never overwrites `config.yaml`, it adds missing lens files and `.gitignore` entries, and `--force` is now a no-op. `--reset-config` writes a fresh config after saving the old one as `config.yaml.bak`.
+- **`config.yaml` is validated when loaded.** An unknown key is reported, a wrong value is an error before anything is transcribed, `summarizer: null` means `none`, and `stt` is accepted as another spelling of `stt_backend`.
 
 ## Roadmap (not in v0.2)
 

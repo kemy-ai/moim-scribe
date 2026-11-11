@@ -45,8 +45,9 @@ echo "YOUR_KEY" > ~/MyMeetings/.soniox_key
 ```
 
 `moim-scribe init` adds `.soniox_key` to the workspace `.gitignore`. If your
-workspace predates this file, run `moim-scribe init --force` — it appends the
-missing entry and leaves the rest of your `.gitignore` alone. `SONIOX_API_KEY`
+workspace predates this file, run `moim-scribe init <workspace>` again: it
+appends the missing entries, leaves the rest of your `.gitignore` alone, and
+never touches `config.yaml`. `SONIOX_API_KEY`
 in the environment works too and takes precedence.
 
 ## Turn it on

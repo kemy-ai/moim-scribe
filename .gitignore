@@ -25,12 +25,13 @@ results/
 _processing/
 _done/
 _error/
-# Only lenses, styles, and synthetic examples ship with the repo.
-# Any other pack directory is treated as personal data.
+# Packs hold rosters and private notes. If a workspace is ever created inside a
+# clone, only the lenses and the synthetic examples may be committed; every other
+# pack directory is treated as personal data.
 packs/*
 !packs/lenses
-!packs/styles
 !packs/examples
+glossary.txt
 # Per-round history cards accumulate real meeting content.
 _history/
 # Model caches (downloaded locally, never committed)

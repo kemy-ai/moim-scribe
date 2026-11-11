@@ -6,8 +6,14 @@ lighter `scan-inbox` (single pass) on an interval — simpler and more robust
 than supervising a long-lived watcher, and the pipeline's claim/lock design
 makes overlapping runs harmless.
 
-Find your executable path first: `which moim-scribe` (macOS/Linux) or
-`where moim-scribe` (Windows).
+The `moim-scribe` command exists inside the virtual environment you installed
+it into (the README install blocks create `~/moim-scribe-env`). A scheduler does
+not activate that environment, so give it the full path of the executable
+instead: `which moim-scribe` (macOS/Linux) or `where moim-scribe` (Windows) with
+the environment active, for example `/Users/USER/moim-scribe-env/bin/moim-scribe`
+(`%USERPROFILE%\moim-scribe-env\Scripts\moim-scribe.exe` on Windows). The
+`~/.local/bin/moim-scribe` used below is only where `pipx` or
+`pip install --user` would put it; replace it with your path.
 
 ## macOS — launchd
 
@@ -37,9 +43,20 @@ Find your executable path first: `which moim-scribe` (macOS/Linux) or
 launchctl load ~/Library/LaunchAgents/com.moim-scribe.plist
 ```
 
-Note: launchd runs with a minimal PATH — use absolute paths, and make sure
-ffmpeg's directory is visible (e.g. add an `EnvironmentVariables` dict with
-`PATH=/opt/homebrew/bin:/usr/bin:/bin`).
+Note: launchd runs with a minimal PATH. Use absolute paths, and make sure the
+directories of `ffmpeg` and `claude` (the default summarizer) are visible: add an
+`EnvironmentVariables` dict whose `PATH` lists them, for example
+`/opt/homebrew/bin:/Users/USER/.local/bin:/usr/local/bin:/usr/bin:/bin`
+(Homebrew's ffmpeg is usually in `/opt/homebrew/bin`; Claude Code is usually in
+`~/.local/bin`; check with `which ffmpeg claude`). If a tool is missing,
+`scan-inbox` logs the setup problem, exits 1, and leaves every recording where
+it is.
+
+If the workspace or its inbox is in a cloud-synced folder (iCloud Drive, Google
+Drive, Dropbox), macOS may refuse a launchd job access to it silently. Grant Full
+Disk Access to the program that runs the job (System Settings, Privacy &
+Security, Full Disk Access; add the Python in your virtual environment or the
+executable above), then reload the job.
 
 ## Linux — systemd user timer
 
