@@ -45,16 +45,20 @@ can name speakers automatically — is everyone OK with that?"
   Fingerprinting is always local: after the first model download that model is
   forced offline (`HF_HUB_OFFLINE`), so matching voices never touches the
   network. Two other steps can, and neither does unless you configure it:
-  - `stt_backend: soniox` uploads the **audio itself** to Soniox for transcription.
-    moim-scribe deletes the uploaded file and the transcription when it
-    finishes, and logs what to delete by hand if that fails — but the
-    recording was on a third party's servers in the meantime, and their
-    retention is governed by their terms, not this tool's. The default
-    backends (`mlx`, `faster`) keep the audio on your machine.
+  - `stt_backend: soniox` uploads the **audio itself** to Soniox for transcription,
+    and, when the workspace has a `glossary.txt`, sends its text along as
+    context (it usually holds names of people and places). Soniox then
+    produces the transcript on its servers. Once a recording is transcribed,
+    or its transcription failed, moim-scribe asks Soniox to delete the uploaded
+    file and the transcription, and logs what to delete by hand if that
+    request fails. The recording was on a third party's servers in the
+    meantime, and their retention is governed by their terms, not this tool's.
+    The default backends (`mlx`, `faster`) keep the audio on your machine.
   - `claude_cli` / `anthropic_api` send the **transcript** to Anthropic. The
     prompt holds the transcript, the recording's title and time, the speaker
     statistics, and your pack background when a pack matches; never the audio
-    and never a fingerprint. `ollama` / `none` do not send it to Anthropic.
+    and never a fingerprint. `claude_cli` starts Claude Code so that it keeps
+    no session on disk, so the prompt is not saved in its session history. `ollama` / `none` do not send it to Anthropic.
     (`ollama` stays on your machine unless `OLLAMA_HOST` points at another
     server; `moim-scribe doctor` prints where the audio and the transcript go.)
 
