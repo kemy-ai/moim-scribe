@@ -150,9 +150,20 @@ def enroll(
             by_speaker[spk].append((float(s["start"]), float(s["end"])))
 
     accepted = dict(mapping)
+    labels_in_file = {str(s.get("speaker")) for s in segs}
+    # A label with no ranges is almost always a typo or a label number from a
+    # different run. Skipping it quietly would let a script read a partial
+    # enrollment as a complete one, so it is a refusal (enroll exits 1).
+    for spk in [spk for spk in mapping if not by_speaker[spk]]:
+        refuse(spk, mapping[spk], "label not found",
+               f"{spk} has no ranges in {Path(jsonl).name}; the labels in that file are "
+               f"{', '.join(sorted(labels_in_file)) or '(none)'}",
+               "Check the label against the transcript of this recording.")
+        del accepted[spk]
     if not allow_duplicate:
-        labels_in_file = {str(s.get("speaker")) for s in segs}
         for spk, reason in _duplicate_refusals(mapping, labels_in_file).items():
+            if spk not in accepted:
+                continue
             refuse(spk, mapping[spk], "duplicate name", reason,
                    "If it really is one person split across two labels, rerun with "
                    "--allow-duplicate.")
@@ -161,15 +172,12 @@ def enroll(
     for spk, name in accepted.items():
         n_segs = len(by_speaker[spk])
         total = sum(e - s for s, e in by_speaker[spk])
-        if n_segs == 0:
-            logger.warning(f"{spk}({name}): no ranges found in jsonl — skipping")
-        else:
-            logger.info(f"{spk}({name}): {n_segs} ranges, {total:.1f}s total")
-            if total < MIN_TOTAL_SEC_WARN:
-                logger.warning(
-                    f"{spk}({name}): only {total:.1f}s of speech — "
-                    f"below {MIN_TOTAL_SEC_WARN}s, fingerprint quality may be low"
-                )
+        logger.info(f"{spk}({name}): {n_segs} ranges, {total:.1f}s total")
+        if total < MIN_TOTAL_SEC_WARN:
+            logger.warning(
+                f"{spk}({name}): only {total:.1f}s of speech, "
+                f"below {MIN_TOTAL_SEC_WARN}s, fingerprint quality may be low"
+            )
     if not any(by_speaker[spk] for spk in accepted):
         return result
 
