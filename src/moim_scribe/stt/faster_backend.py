@@ -1,6 +1,6 @@
 """Cross-platform STT backend using faster-whisper (CTranslate2).
 
-Works on Windows, Linux, and Intel Macs (CUDA or CPU). Experimental:
+Works on Windows and Linux (CUDA or CPU). Experimental:
 the pipeline was originally tuned against the mlx backend on Apple
 Silicon; decoding parameters are mapped 1:1 but field reports welcome.
 

@@ -539,3 +539,38 @@ def test_process_reports_an_ordinary_failure_in_one_line(tmp_path, monkeypatch, 
     assert "Traceback" not in err
     assert src.read_bytes() == b"x" * 100
     assert not list(ws.glob(".process-*"))
+
+
+def test_process_reports_a_refused_token_as_a_setup_problem(tmp_path, monkeypatch, capsys):
+    """A token the Hub refuses only shows at model load, as SetupProblem. In
+    `process` it must read as a setup problem, not as a failed recording."""
+    from moim_scribe.diarize import SetupProblem
+
+    ws = tmp_path / "ws"
+    assert cli.main(["init", str(ws), "--language", "en"]) == 0
+    src = tmp_path / "rec.m4a"
+    src.write_bytes(b"x" * 100)
+
+    def refused(cfg, claimed, **kw):
+        raise SetupProblem("the Hub refused this token: run moim-scribe doctor --online")
+
+    monkeypatch.setattr("moim_scribe.pipeline.process_recording", refused)
+    capsys.readouterr()
+    assert cli.main(["process", str(src), "--workspace", str(ws)]) == 1
+    err = capsys.readouterr().err
+    assert "setup problem: the Hub refused this token" in err
+    assert "failed:" not in err
+    assert not list(ws.glob(".process-*"))
+
+
+def test_third_party_import_chatter_is_quiet_unless_verbose():
+    import logging
+
+    names = ("httpx", "matplotlib.font_manager", "speechbrain.utils.quirks")
+    cli._setup_logging(False)
+    for name in names:
+        assert logging.getLogger(name).level == logging.WARNING, name
+    cli._setup_logging(True)
+    for name in names:
+        assert logging.getLogger(name).level == logging.NOTSET, name
+

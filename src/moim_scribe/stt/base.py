@@ -3,8 +3,8 @@
 Two backends ship with moim-scribe:
   - "mlx"    mlx-whisper, Apple Silicon only (fastest on M-series; the
              configuration this project was originally tuned on)
-  - "faster" faster-whisper (CTranslate2), cross-platform: Windows, Linux,
-             Intel Mac. Marked experimental until field-verified.
+  - "faster" faster-whisper (CTranslate2), cross-platform: Windows and Linux.
+             Marked experimental until field-verified.
 
 Both receive the same decoding parameters, chosen to suppress whisper's
 repetition-loop pathology on long real-world recordings:

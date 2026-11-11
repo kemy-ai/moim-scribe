@@ -94,7 +94,11 @@ GITIGNORE_ENTRIES = (
 
 # Loggers that report every HTTP request at INFO (one line per request, 22 on a
 # first run that downloads models). Kept for --verbose.
-NOISY_LOGGERS = ("httpx", "httpx2")
+# Third-party loggers that print at INFO while this tool is only importing or
+# downloading: request lines from the Hub clients, and (seen in a Windows run of
+# `doctor`) a font-cache notice from matplotlib and two lines from speechbrain.
+NOISY_LOGGERS = ("httpx", "httpx2", "matplotlib", "matplotlib.font_manager",
+                 "speechbrain", "speechbrain.utils.quirks")
 
 
 class WorkspaceMissing(Exception):
@@ -322,6 +326,7 @@ def cmd_process(args) -> int:
     copy of the recordings it has claimed, and the cleanup removes exactly
     that one folder.
     """
+    from .diarize import SetupProblem
     from .pipeline import process_recording
 
     cfg = _cfg(args.workspace)
@@ -360,9 +365,10 @@ def cmd_process(args) -> int:
         shutil.copy2(src, claimed)
         try:
             out = process_recording(cfg, claimed, summarize=summarize)
-        except SystemExit as e:
-            # get_hf_token and friends refuse with SystemExit. The preflight
-            # above should have caught it; if not, report it the same way.
+        except (SystemExit, SetupProblem) as e:
+            # get_hf_token refuses with SystemExit and a token the Hub will not
+            # accept surfaces as SetupProblem. The preflight above catches the
+            # first; the second only shows at model load. Report both the same way.
             _err(f"setup problem: {e}")
             return 1
         except Exception as e:  # noqa: BLE001 - a one-off command should end in one line, not a traceback
