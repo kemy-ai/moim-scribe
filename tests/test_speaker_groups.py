@@ -150,11 +150,12 @@ class TestEnrollTagging:
             db.save_index({n: {"total_sec": 100, "n_samples": 1} for n in names})
 
         monkeypatch.setattr("moim_scribe.speakers.enroll.enroll",
-                            lambda *a, **k: None)
+                            lambda *a, **k: {"enrolled": list(names), "refused": []})
         args = argparse.Namespace(
             workspace=str(tmp_path), audio="a.m4a", jsonl="a.jsonl",
             mapping=[f"SPEAKER_0{i}={n}" for i, n in enumerate(names)],
-            group=group, attends_all=attends_all)
+            group=group, attends_all=attends_all,
+            allow_duplicate=False, force=False, enroll_all=False)
         assert cli.cmd_enroll(args) == 0
         return db.load_index()
 
@@ -187,3 +188,23 @@ class TestEnrollTagging:
         by the tagging step — tags describe enrolled speakers, nothing else."""
         index = self._run(tmp_path, monkeypatch, group="book-club", preexisting=False)
         assert index == {}
+
+    def test_refused_name_is_not_tagged_and_exit_is_nonzero(self, tmp_path, monkeypatch):
+        """A guard refused the pair: tagging an existing entry anyway would
+        record a group for an enrollment that never happened."""
+        import argparse
+
+        from moim_scribe import cli
+        from moim_scribe.speakers.db import SpeakerDB
+
+        cfg = cli._cfg(str(tmp_path))
+        db = SpeakerDB(cfg.speakers_dir)
+        db.save_index({"Ari": {"total_sec": 100, "n_samples": 1}})
+        monkeypatch.setattr("moim_scribe.speakers.enroll.enroll", lambda *a, **k: {
+            "enrolled": [], "refused": [{"label": "SPEAKER_00", "name": "Ari"}]})
+        args = argparse.Namespace(
+            workspace=str(tmp_path), audio="a.m4a", jsonl="a.jsonl",
+            mapping=["SPEAKER_00=Ari"], group="book-club", attends_all=False,
+            allow_duplicate=False, force=False, enroll_all=False)
+        assert cli.cmd_enroll(args) == 1
+        assert "groups" not in db.load_index()["Ari"]

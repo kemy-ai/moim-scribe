@@ -227,3 +227,19 @@ def test_no_hint_produces_no_ignore_notice(wired, tmp_path, caplog):
         dc.run_cloud_diarization(str(audio), api_key="k", speaker_db=None,
                                  model_dir=tmp_path)
     assert "ignored" not in caplog.text
+
+
+def test_two_voice_result_reaches_write_outputs(wired, tmp_path, monkeypatch):
+    """The cloud path must hand identify_and_repair's mixed_check to the writer,
+    or the diagnostic exists in memory and never lands in speakers.json."""
+    audio, _ = wired
+    seen = {}
+    marker = {"checked": 1, "suspects": {}}
+    monkeypatch.setattr(dc, "identify_and_repair", lambda audio, merged, raw, db, md, i: (
+        merged, {}, {}, {"triggered": False, "mixed_check": marker}
+    ))
+    monkeypatch.setattr(dc, "write_outputs", lambda *a, **k: (
+        seen.update(k) or ("j.jsonl", "t.txt", "s.json", {"n_speakers": 2})
+    ))
+    dc.run_cloud_diarization(str(audio), api_key="k", speaker_db=None, model_dir=tmp_path)
+    assert seen["mixed_info"] is marker

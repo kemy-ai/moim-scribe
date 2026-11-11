@@ -18,6 +18,12 @@ One field survives from the reassignment block — `triggered`. It is a boolean,
 so it names nobody, and a lens needs it: when labels were reassigned by
 fingerprint re-checking, an enrolled person who was absent can have their name
 attached to someone else, and the deliverable should say so.
+
+Leftover noise labels (diarize._mark_leftover_noise) are a third case: not
+diagnostic, but not people either. Their entries are removed, the label-count
+field that still includes them is dropped, and one note names the excluded
+labels - the transcript still carries those labels, and without the note a
+summarizer reading it would count them back in as attendees.
 """
 from __future__ import annotations
 
@@ -25,10 +31,23 @@ import json
 import logging
 from pathlib import Path
 
+from .diarize import LEFTOVER_NOISE_MAX_SEC
+
 logger = logging.getLogger("moim_scribe.speaker_stats")
 
-# Diagnostic-only keys inside each speakers[] entry.
-DIAG_ENTRY_KEYS = frozenset({"match_score_full_db"})
+# Diagnostic-only keys inside each speakers[] entry. mixed_suspect_diag is a
+# boolean, but "part of this label may be someone else" is for the human to
+# check, not for a summarizer to act on - listed by name as well as by suffix.
+DIAG_ENTRY_KEYS = frozenset({"match_score_full_db", "mixed_suspect_diag"})
+
+# Diagnostic-only top-level blocks. mixed_check_diag carries the labels already
+# on the flagged clusters, and those can be names identification got wrong.
+DIAG_TOP_KEYS = frozenset({"mixed_check_diag"})
+
+# Leftover noise handling (see the module docstring).
+NOISE_ENTRY_FLAG = "leftover_noise"
+NOISE_TOP_KEYS = frozenset({"n_labels_total"})
+NOISE_NOTE_KEY = "excluded_noise_labels"
 
 # Keys of the top-level merge_reassign block that may reach a prompt. Everything
 # else in that block is dropped. Inverted deliberately — an allow-list here means
@@ -50,7 +69,7 @@ def strip_diagnostic_keys(data: dict) -> dict:
     """Return a copy of a speakers.json dict safe to place in a prompt."""
     out: dict = {}
     for key, value in data.items():
-        if _is_diag(key):
+        if _is_diag(key) or key in DIAG_TOP_KEYS or key in NOISE_TOP_KEYS:
             continue
         if key == "merge_reassign":
             if isinstance(value, dict):
@@ -59,16 +78,24 @@ def strip_diagnostic_keys(data: dict) -> dict:
                 }
             continue
         if key == "speakers" and isinstance(value, list):
-            out[key] = [
-                {
-                    k: v
-                    for k, v in entry.items()
-                    if k not in DIAG_ENTRY_KEYS and not _is_diag(k)
-                }
-                if isinstance(entry, dict)
-                else entry
-                for entry in value
-            ]
+            cleaned, noise = [], []
+            for entry in value:
+                if not isinstance(entry, dict):
+                    cleaned.append(entry)
+                elif entry.get(NOISE_ENTRY_FLAG):
+                    noise.append(str(entry.get("label", "")))
+                else:
+                    cleaned.append({
+                        k: v for k, v in entry.items()
+                        if k not in DIAG_ENTRY_KEYS and not _is_diag(k) and k != NOISE_ENTRY_FLAG
+                    })
+            out[key] = cleaned
+            if noise:
+                out[NOISE_NOTE_KEY] = (
+                    f"Transcript label(s) {', '.join(noise)} hold {LEFTOVER_NOISE_MAX_SEC:g} s or "
+                    f"less of sound each ({len(noise)} label(s)); they are noise, not people, "
+                    "and are excluded from n_speakers"
+                )
             continue
         out[key] = value
     return out

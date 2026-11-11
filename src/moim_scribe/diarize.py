@@ -800,6 +800,77 @@ def detect_and_fix_merged_speakers(
     return merged, info
 
 
+# Leftover noise labels. A label that is a SPEAKER_NN cluster, matched nobody,
+# and holds at most this much speech in total is counted as noise, not as a
+# person. Typical source: the hybrid step leaves segments that fall in a gap
+# between pyannote turns with the label they arrived with, so a fragment of
+# 0.2-0.6 s can surface as its own "speaker" and turn a two-person call into
+# "four attendees". The transcript keeps the label; only the counting changes.
+# 1.0 s is a judgement, not a measured break: upstream, unidentified leftover
+# labels were spread smoothly from under a second to over thirty, with no gap
+# to cut at. 1.0 covers the observed noise fragments while being the value
+# least likely to drop a real person who answered with one short word.
+LEFTOVER_NOISE_MAX_SEC = 1.0
+_SPEAKER_NN_RE = re.compile(r"SPEAKER_\d+")
+
+
+def _mark_leftover_noise(speakers_data: list) -> int:
+    """Flag leftover noise labels with leftover_noise=True; return how many.
+
+    A label qualifies only when all three hold: it is a SPEAKER_NN label (a
+    real name is never noise), it was not identified, and its total speech is
+    <= LEFTOVER_NOISE_MAX_SEC. Mutates the entries it flags.
+    """
+    n = 0
+    for e in speakers_data:
+        if (_SPEAKER_NN_RE.fullmatch(str(e.get("label", "")))
+                and not e.get("identified")
+                and float(e.get("talk_sec") or 0.0) <= LEFTOVER_NOISE_MAX_SEC):
+            e["leftover_noise"] = True
+            n += 1
+    return n
+
+
+def run_mixed_check(
+    wav, sr: int, merged: list[dict], raw_labels: list[str], id_mapping: dict,
+    db: dict, model_dir: Path, reassigned: bool = False,
+) -> dict | None:
+    """Two-voice suspicion on raw clusters (speakers.mixed). Display only.
+
+    Shared by both engines through identify_and_repair. Never changes a label
+    and never raises: any failure is logged and returns None, so a broken
+    display step ends as "no display" and the run carries on. Set
+    MOIM_SCRIBE_MIXED_CHECK=0 to skip it (it costs one embedding per long
+    block).
+    """
+    if os.environ.get("MOIM_SCRIBE_MIXED_CHECK") == "0":
+        logger.info("two-voice check skipped (MOIM_SCRIBE_MIXED_CHECK=0)")
+        return None
+    if wav is None or not merged:
+        logger.info("two-voice check skipped - no audio loaded (identification did not run)")
+        return None
+    try:
+        from .speakers import mixed
+        from .speakers.embed import extract_embedding_from_segments
+
+        def embed_fn(w, rate, segs):
+            return extract_embedding_from_segments(w, rate, segs, model_dir)
+
+        t = time.time()
+        info = mixed.check_mixed_clusters(wav, sr, merged, raw_labels, embed_fn, id_mapping, db)
+        info["reassigned"] = bool(reassigned)
+        for line in mixed.format_suspect_lines(info):
+            logger.info(line)
+        logger.info(f"  two-voice check took {time.time() - t:.0f}s")
+        return info
+    except (Exception, SystemExit) as e:  # noqa: BLE001 - display step, never fatal
+        # SystemExit too: on the cloud path it would escape the watch loop's
+        # Exception handler and stop the service over a diagnostic.
+        logger.warning(f"two-voice check failed (display only, run continues): "
+                       f"{type(e).__name__}: {e}")
+        return None
+
+
 def write_outputs(
     session: str,
     prefix: str,
@@ -807,6 +878,7 @@ def write_outputs(
     id_mapping: dict,
     id_sims: dict,
     merge_info: dict,
+    mixed_info: dict | None = None,
 ) -> tuple[str, str, str, dict]:
     """Write the three-file output contract and return it.
 
@@ -819,6 +891,10 @@ def write_outputs(
     attaches the *_path keys onto that dict; this function does not, so the
     schema it owns stays free of local filesystem paths — the dict travels into
     summarizer prompts, and a home directory is user-identifying.
+
+    mixed_info is the two-voice check result (run_mixed_check) or None. It is
+    written as the diagnostic block `mixed_check_diag` and as a per-speaker
+    `mixed_suspect_diag` flag; speaker_stats keeps both out of prompts.
     """
     talk: Counter = Counter()
     for m in merged:
@@ -839,6 +915,7 @@ def write_outputs(
     # reassignment, a speaker can carry a real name via the anchor set even
     # though cluster-mean matching (id_mapping) never saw them.
     identified_names = set(id_mapping.values()) | set(merge_info.get("anchors", []))
+    mixed_suspects = set((mixed_info or {}).get("suspects") or {})
     speakers_data = []
     for spk, t_sec in talk.most_common():
         entry = {
@@ -853,12 +930,25 @@ def write_outputs(
             scored = id_sims.get(raw_label, [])
             if scored:
                 entry["match_score"] = round(scored[0][1], 3)
+        # Two-voice suspicion (display only): this label's raw cluster split
+        # into two voices. Diagnostic - a summarizer that saw it would start
+        # second-guessing names on its own.
+        if spk in mixed_suspects or (raw_label and raw_label in mixed_suspects):
+            entry["mixed_suspect_diag"] = True
         speakers_data.append(entry)
 
+    n_noise = _mark_leftover_noise(speakers_data)
     speakers_json: dict = {
-        "n_speakers": len(speakers_data),
+        # People, not labels: leftover noise labels are not counted (see
+        # _mark_leftover_noise). Identical to the label count when there is no
+        # noise; when there is, n_labels_total keeps the list length.
+        "n_speakers": len(speakers_data) - n_noise,
         "speakers": speakers_data,
     }
+    if n_noise:
+        speakers_json["n_labels_total"] = len(speakers_data)
+    if mixed_info:
+        speakers_json["mixed_check_diag"] = mixed_info
     if merge_info.get("triggered") or merge_info.get("presence_unconfirmed"):
         # An allow-list, not a passthrough: putting a field on merge_info does
         # NOT surface it here. Adding one means editing this dict too, and then
@@ -951,6 +1041,14 @@ def identify_and_repair(
         status = "merge detection (triggered)" if merge_info.get("triggered") else "merge detection (clean)"
         logger.info(f"  {status} took {time.time() - t4:.0f}s")
 
+    # After naming and repair, on the raw clusters. Carried on merge_info under
+    # "mixed_check" so the return shape stays the same; write_outputs never
+    # copies it into merge_reassign (that block is an allow-list) - callers
+    # pass it explicitly as mixed_info.
+    merge_info["mixed_check"] = run_mixed_check(
+        wav, sr, merged, raw_labels, id_mapping, db, model_dir,
+        reassigned=bool(merge_info.get("triggered")),
+    )
     return merged, id_mapping, id_sims, merge_info
 
 
@@ -1066,7 +1164,8 @@ def run_diarization(
     )
 
     out_jsonl, out_txt, out_speakers, speakers_json = write_outputs(
-        session, prefix, merged, id_mapping, id_sims, merge_info
+        session, prefix, merged, id_mapping, id_sims, merge_info,
+        mixed_info=merge_info.get("mixed_check"),
     )
     logger.info(f"done -> {out_txt} ({time.time() - t0:.0f}s total)")
 
