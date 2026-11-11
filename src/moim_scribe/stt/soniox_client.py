@@ -30,6 +30,8 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+from ..secrets import read_secret_file
+
 logger = logging.getLogger("moim_scribe.soniox")
 
 REGION_BASE_URLS = {
@@ -98,13 +100,12 @@ def get_api_key(workspace: Path, arg_key: str | None = None) -> str:
     if os.environ.get("SONIOX_API_KEY"):
         return os.environ["SONIOX_API_KEY"]
     p = Path(workspace) / ".soniox_key"
-    if p.exists():
-        key = p.read_text(encoding="utf-8").strip()
-        if key:
-            return key
+    key = read_secret_file(p)
+    if key:
+        return key
     raise SonioxKeyMissing(
         "No Soniox API key found. Set SONIOX_API_KEY or create "
-        f"{p}. See docs/setup-soniox.md — or set stt: mlx in config.yaml "
+        f"{p}. See docs/setup-soniox.md — or set stt_backend: mlx in config.yaml "
         "to transcribe locally instead."
     )
 

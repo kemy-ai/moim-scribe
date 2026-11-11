@@ -9,7 +9,7 @@ reaches both at once.
 
 🔴 The recording leaves the machine here. Choosing this engine means uploading
 the audio to Soniox, and the summarizer choice is a separate question — with
-`stt: soniox` and `summarizer: none` the audio goes out and the transcript
+`stt_backend: soniox` and `summarizer: none` the audio goes out and the transcript
 stays home; the reverse is also possible. docs/privacy.md states both.
 
 Optionally the speaker boundaries come back from pyannote instead — the hybrid
@@ -225,7 +225,7 @@ def run_cloud_diarization(
     if duration is not None and duration > soniox_client.MAX_AUDIO_MINUTES * 60:
         raise ValueError(
             f"{duration / 60:.0f} minutes exceeds Soniox's {soniox_client.MAX_AUDIO_MINUTES}-minute "
-            "limit, which cannot be raised. Split the recording, or set stt: mlx "
+            "limit, which cannot be raised. Split the recording, or set stt_backend: mlx "
             "in config.yaml to transcribe this one locally."
         )
 
