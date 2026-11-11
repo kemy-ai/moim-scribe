@@ -150,7 +150,7 @@ def _repair_gitignore(ws: Path) -> None:
         print(f"  added to .gitignore: {', '.join(missing)}")
 
 
-def _copy_shipped_files(packs_dir: Path) -> None:
+def _copy_shipped_files(packs_dir: Path, announce: bool) -> None:
     """Copy the shipped lens files and example packs that are not there yet."""
     templates = importlib.resources.files("moim_scribe") / "templates"
     dst_dir = packs_dir / "lenses"
@@ -159,7 +159,8 @@ def _copy_shipped_files(packs_dir: Path) -> None:
         dst = dst_dir / item.name
         if not dst.exists():
             dst.write_text(item.read_text(encoding="utf-8"), encoding="utf-8")
-            print(f"  added {dst.relative_to(packs_dir.parent)}")
+            if announce:
+                print(f"  added {dst.relative_to(packs_dir.parent)}")
     # An example pack is copied as a whole, only when its folder is absent: a
     # user who edited it keeps their version.
     for pack in templates.joinpath("examples").iterdir():
@@ -183,6 +184,7 @@ def cmd_init(args) -> int:
     reset = getattr(args, "reset_config", False)
     ws.mkdir(parents=True, exist_ok=True)
     cfg_path = ws / CONFIG_NAME
+    existed = cfg_path.exists()
 
     if force and not reset:
         print("note: --force no longer resets config.yaml; use --reset-config for that")
@@ -211,7 +213,7 @@ def cmd_init(args) -> int:
     # even when the existing config.yaml turns out to be unusable below.
     skeleton = Config(workspace=ws)
     ensure_workspace_dirs(skeleton)
-    _copy_shipped_files(skeleton.packs_dir)
+    _copy_shipped_files(skeleton.packs_dir, announce=existed)
     # A workspace-local safety net in case the user ever runs `git init` here.
     _repair_gitignore(ws)
     # Raises ConfigError for a config.yaml that cannot be used: the one the
