@@ -13,10 +13,16 @@ from pathlib import Path
 
 # Hugging Face repos the code loads that need "Agree and access" on the Hub.
 # diarize.diarize_turns loads speaker-diarization-3.1, and that pipeline in turn
-# loads segmentation-3.0. The embedding model (speechbrain ECAPA) is not gated.
+# loads segmentation-3.0. The third is not named anywhere in this code: under
+# pyannote.audio 4 the 3.1 pipeline also fetches its PLDA files from
+# speaker-diarization-community-1 (observed in a real run as requests for
+# .../speaker-diarization-community-1/.../plda/*.npz), so a token that was only
+# granted the first two fails at load. docs/setup-pyannote.md lists the same
+# three. The embedding model (speechbrain ECAPA) is not gated.
 GATED_HF_REPOS = (
     "pyannote/speaker-diarization-3.1",
     "pyannote/segmentation-3.0",
+    "pyannote/speaker-diarization-community-1",
 )
 
 
