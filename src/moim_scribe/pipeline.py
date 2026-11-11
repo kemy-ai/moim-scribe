@@ -69,8 +69,20 @@ PROMPT_HEADERS = {
 }
 
 _HEADING_MARKER = re.compile(r"#{1,6}\s")
-_KO_FILENAME_COUNT = re.compile(r"([0-9]+)\s*[명인]")
-_EN_FILENAME_COUNT = re.compile(r"\b([0-9]+)\s*(?:p|ppl|people|speakers?)\b", re.IGNORECASE)
+# A count is one or two digits that do not continue a longer number, so
+# "2025 ..." and "1103 ..." never read as a count of 25 or 3.
+#   명 counts people in any position ("5명", "5명 회의"), but not as the first
+#     syllable of a word ("2025 명절").
+#   인 is also a prefix that builds nouns ("3인칭", "1인 가구", "1인 기업"), so
+#     it counts only where no Hangul word follows it, after optional spaces:
+#     "회의 3인" and "전략회의 3인 final" do, "1인 가구 인터뷰" does not.
+_KO_FILENAME_COUNT = re.compile(
+    r"(?<![0-9])([0-9]{1,2})\s*(?:명(?![가-힣])|인(?!\s*[가-힣]))"
+)
+_EN_FILENAME_COUNT = re.compile(
+    r"(?<![0-9])\b([0-9]{1,2})\s*(?:p|ppl|people|speakers?)\b", re.IGNORECASE
+)
+FILENAME_COUNT_RANGE = (1, 30)
 
 
 def filename_speaker_hint(title: str, language: str) -> tuple[int | None, str]:
@@ -79,15 +91,22 @@ def filename_speaker_hint(title: str, language: str) -> tuple[int | None, str]:
     Naming the count in the filename ("book club 5명", "standup 4p") is the
     most reliable source — set at save time, never misheard. Filenames from
     phones are frequently NFD, so normalize first.
+
+    The count is forced on the speaker separation, so a false hit is worse
+    than none: "1103 인터뷰" used to become 1103 speakers and the title "터뷰".
+    Only a count of 1 to 30 is taken, and when nothing qualifies the title is
+    returned untouched.
     """
     t = unicodedata.normalize("NFC", title)
     pattern = _KO_FILENAME_COUNT if language == "ko" else _EN_FILENAME_COUNT
-    m = pattern.search(t)
-    if not m:
-        return None, t
-    count = int(m.group(1))
-    cleaned = re.sub(r"\s+", " ", pattern.sub("", t)).strip()
-    return count, (cleaned or "untitled")
+    lo, hi = FILENAME_COUNT_RANGE
+    for m in pattern.finditer(t):
+        count = int(m.group(1))
+        if not lo <= count <= hi:
+            continue
+        cleaned = re.sub(r"\s+", " ", t[: m.start()] + " " + t[m.end():]).strip()
+        return count, (cleaned or "untitled")
+    return None, t
 
 
 def _headers(language: str) -> dict:
