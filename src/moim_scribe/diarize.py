@@ -154,6 +154,52 @@ MERGE_WINNER_MIN_AVG_SIM = 0.28  # a merge "winner" needs not just share but
 # withholds the whole repair before any label is applied.
 
 
+class SetupProblem(RuntimeError):
+    """The setup, not the recording, is what stopped processing.
+
+    scan_inbox treats it like SystemExit: the recording goes back where it was
+    claimed from and the pass stops, so the user fixes the setup and nothing
+    is lost to _error. It is an ordinary Exception on purpose: the hybrid step
+    on the Soniox path absorbs every Exception from diarize_turns, and a model
+    the token cannot reach must keep meaning "skip the improvement" there.
+    """
+
+
+# What the Hugging Face Hub raises when this token may not download a model:
+# terms not accepted on a gated page, a wrong or revoked token (401), or no
+# access (403). Matched by class name so huggingface_hub is never imported
+# just to recognise its errors. LocalEntryNotFoundError is deliberately not
+# here: it means "offline and not cached", which no token fixes.
+_HUB_ACCESS_ERRORS = ("GatedRepoError", "RepositoryNotFoundError")
+_HUB_HTTP_ERROR = "HfHubHTTPError"
+_HUB_OFFLINE_ERROR = "LocalEntryNotFoundError"
+
+MODEL_ACCESS_FIX = (
+    "the Hugging Face token cannot download the pyannote models: run "
+    "`moim-scribe doctor --online` to see which model page still needs \"Agree and "
+    "access repository\" (or whether the token itself is refused), then try again"
+)
+
+
+def is_hub_access_error(exc: BaseException) -> bool:
+    """Whether exc, or an exception it was raised from, is the Hub refusing the token."""
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        names = {k.__name__ for k in type(cur).__mro__}
+        if _HUB_OFFLINE_ERROR in names:
+            return False
+        if names.intersection(_HUB_ACCESS_ERRORS):
+            return True
+        if _HUB_HTTP_ERROR in names:
+            status = getattr(getattr(cur, "response", None), "status_code", None)
+            if status in (401, 403):
+                return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
 def find_hf_token(data_dir: Path, arg_token: str | None = None) -> str | None:
     """The token, or None — for callers to whom a missing token is not fatal.
 
@@ -360,15 +406,38 @@ def diarize_turns(audio: str, token: str, num_speakers: int | None) -> list[tupl
     # processes private conversations, so telemetry is opt-in: users who want
     # to support pyannote's stats can export PYANNOTE_METRICS_ENABLED=true.
     os.environ.setdefault("PYANNOTE_METRICS_ENABLED", "false")
+    import numpy
+    import soundfile
     import torch
     from pyannote.audio import Pipeline
 
-    pipe = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=token)
+    # A token that exists but may not download a model is the likeliest
+    # first-run mistake (terms not accepted on one of the three model pages),
+    # and the preflight cannot see it offline. Said as a SetupProblem, it puts
+    # the recording back instead of sending every one of them to _error.
+    try:
+        pipe = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=token)
+    except Exception as e:
+        if is_hub_access_error(e):
+            raise SetupProblem(f"{MODEL_ACCESS_FIX} ({type(e).__name__})") from e
+        raise
+    if pipe is None:
+        # Some pyannote versions print the access problem and return None.
+        raise SetupProblem(MODEL_ACCESS_FIX)
     if torch.backends.mps.is_available():
         pipe.to(torch.device("mps"))
     elif torch.cuda.is_available():
         pipe.to(torch.device("cuda"))
-    out = pipe(audio, num_speakers=num_speakers) if num_speakers else pipe(audio)
+    # In memory, not as a path: pyannote.audio 4 decodes paths with torchcodec,
+    # which needs FFmpeg's shared libraries, and the usual Windows FFmpeg build
+    # is static. `audio` is always the 16 kHz mono wav from prepare_audio, so
+    # soundfile reads it; the turns measured identical to the path call.
+    samples, sample_rate = soundfile.read(audio, dtype="float32", always_2d=True)
+    wav = {
+        "waveform": torch.from_numpy(numpy.ascontiguousarray(samples.T)),  # (channel, time)
+        "sample_rate": sample_rate,
+    }
+    out = pipe(wav, num_speakers=num_speakers) if num_speakers else pipe(wav)
     # pyannote 4.x: DiarizeOutput.speaker_diarization is the Annotation
     ann = out.speaker_diarization if hasattr(out, "speaker_diarization") else out
     return [(t.start, t.end, spk) for t, _, spk in ann.itertracks(yield_label=True)]
@@ -1137,7 +1206,13 @@ def run_diarization(
             logger.info(f"  head transcription for spoken cue took {time.time() - th:.0f}s")
             if detected:
                 num_spk = detected
-                logger.info(f"speaker count: {num_spk} (spoken cue — override with default_speakers in config.yaml if wrong)")
+                # The file name beats the spoken cue, and the cue beats
+                # default_speakers, so only the file name can correct it.
+                example = "회의 4명" if language == "ko" else "meeting 4p"
+                logger.info(
+                    f"speaker count: {num_spk} (spoken cue; if that is wrong, put the count "
+                    f"in the file name, e.g. \"{example}\", and process it again)"
+                )
             else:
                 num_spk = default_speakers or None
                 logger.info(
@@ -1145,7 +1220,7 @@ def run_diarization(
                     " (saying the attendee count at the start of the recording is more reliable)"
                 )
 
-        # whisper and pyannote are independent until the merge step — run them in
+        # whisper and pyannote are independent until the merge step: run them in
         # parallel. They share the GPU, so each is slower than solo, but the total
         # beats sequential.
         t1 = time.time()
@@ -1165,7 +1240,7 @@ def run_diarization(
             logger.info(f"  whisper: {len(segs)} segments ({time.time() - t1:.0f}s)")
             turns = fut.result()
         except Exception:
-            # If whisper fails, don't wait for pyannote — propagate fast so the
+            # If whisper fails, don't wait for pyannote: propagate fast so the
             # caller can quarantine the file.
             ex.shutdown(wait=False, cancel_futures=True)
             raise

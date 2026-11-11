@@ -88,16 +88,27 @@ def _soniox_key_present(cfg: Config) -> bool:
         return False
 
 
-def _enrolled_count(cfg: Config) -> int | None:
-    """How many speakers the fingerprint database names; None if unreadable."""
+def _enrolled_count(cfg: Config) -> tuple[int | None, str]:
+    """How many speakers the fingerprint database names.
+
+    (count, "") when readable; (None, what is wrong with the file) otherwise.
+    """
     path = cfg.speakers_dir / "index.json"
     if not path.exists():
-        return 0
+        return 0, ""
     try:
         index = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return len(index) if isinstance(index, dict) else None
+    except OSError as e:
+        return None, f"cannot be read ({type(e).__name__}: {e})"
+    except ValueError:
+        return None, "is not valid JSON"
+    if not isinstance(index, dict):
+        # Valid JSON, wrong shape: the database maps each name to its entry.
+        return None, (
+            f"is valid JSON but holds a {type(index).__name__}, not the mapping of "
+            "names the speaker database needs"
+        )
+    return len(index), ""
 
 
 def checks(cfg: Config) -> list[Check]:
@@ -134,12 +145,12 @@ def checks(cfg: Config) -> list[Check]:
             "(see docs/setup-pyannote.md)",
         ))
 
-    enrolled = _enrolled_count(cfg)
+    enrolled, what = _enrolled_count(cfg)
     index_path = cfg.speakers_dir / "index.json"
     if enrolled is None:
         out.append(Check(
             "speaker database readable", False,
-            f"{index_path} is not valid JSON: restore it from a backup, or move it away "
+            f"{index_path} {what}: restore it from a backup, or move it away "
             "to start with an empty speaker database",
         ))
     elif enrolled > 0:
