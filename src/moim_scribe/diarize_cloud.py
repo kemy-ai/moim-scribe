@@ -143,7 +143,7 @@ def apply_hybrid_boundaries(
     """
     token = find_hf_token(workspace)
     if not token:
-        logger.debug("hybrid boundaries skipped — no Hugging Face token")
+        logger.debug("hybrid boundaries skipped, no Hugging Face token")
         return merged
 
     t0 = time.time()
@@ -232,7 +232,7 @@ def run_cloud_diarization(
     use_hybrid = bool(hybrid and workspace)
     if num_speakers and not use_hybrid:
         logger.info(
-            f"speaker count hint ({num_speakers}) ignored — Soniox detects speakers "
+            f"speaker count hint ({num_speakers}) ignored, Soniox detects speakers "
             "itself and takes no count. Use a local backend when the count matters."
         )
 
@@ -248,7 +248,7 @@ def run_cloud_diarization(
     transcription_id: str | None = None
     try:
         t_up = time.time()
-        logger.info("uploading…")
+        logger.info("uploading...")
         file_id = soniox_client.upload_file(input_path, base_url, api_key)
         logger.info(f"  uploaded in {time.time() - t_up:.0f}s")
 
@@ -264,7 +264,7 @@ def run_cloud_diarization(
         merged = normalize_segments(soniox_client.tokens_to_segments(tokens))
         if not merged:
             raise RuntimeError(
-                "Soniox returned no usable segments — the recording may be silent "
+                "Soniox returned no usable segments, the recording may be silent "
                 "or in a format it could not decode"
             )
         n_clusters = len({m["speaker"] for m in merged})

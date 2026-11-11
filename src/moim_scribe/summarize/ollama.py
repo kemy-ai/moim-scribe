@@ -44,7 +44,7 @@ class OllamaSummarizer:
         except (urllib.error.URLError, OSError) as e:
             raise RuntimeError(
                 f"Ollama request failed ({self.host}). Is Ollama running and "
-                f"'{self.model}' pulled? — {e}"
+                f"'{self.model}' pulled? {e}"
             ) from e
         out = (data.get("message") or {}).get("content", "").strip()
         if not out:

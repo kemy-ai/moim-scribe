@@ -181,7 +181,7 @@ def enroll(
     if not any(by_speaker[spk] for spk in accepted):
         return result
 
-    logger.info("loading audio (16 kHz mono)…")
+    logger.info("loading audio (16 kHz mono)...")
     wav = load_wav_mono16k(audio)
     sr = 16000
     logger.info(f"audio length {len(wav) / sr:.1f}s")
@@ -192,10 +192,10 @@ def enroll(
         segments = by_speaker[spk]
         if not segments:
             continue
-        logger.info(f"{spk} -> {name}: embedding (top {MAX_SEGMENTS_PER_SPEAKER} longest ranges)…")
+        logger.info(f"{spk} -> {name}: embedding (top {MAX_SEGMENTS_PER_SPEAKER} longest ranges)...")
         emb, used_sec = _embed_all(wav, sr, segments, embed_fn)
         if emb is None:
-            logger.warning(f"{spk}({name}): no usable ranges (>=1s) — not enrolled")
+            logger.warning(f"{spk}({name}): no usable ranges (>=1s), not enrolled")
             continue
 
         existing = db.get_embedding(name)
@@ -214,7 +214,7 @@ def enroll(
         entry = db.upsert_speaker(name, emb, source=source_label, used_sec=used_sec)
         result["enrolled"].append(name)
         logger.info(
-            f"{name} enrolled — {used_sec:.1f}s from this source, "
+            f"{name} enrolled, {used_sec:.1f}s from this source, "
             f"{entry['total_sec']}s total across {entry['n_samples']} samples"
         )
 

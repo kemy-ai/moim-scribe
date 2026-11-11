@@ -114,9 +114,9 @@ def render_speaker_stats_block(path: Path) -> str:
     except (OSError, ValueError) as e:
         # Deliberately does not include the file contents — this module exists to
         # keep those names out of places they don't belong, logs included.
-        logger.warning(f"speakers.json unreadable ({type(e).__name__}) — omitting speaker stats")
+        logger.warning(f"speakers.json unreadable ({type(e).__name__}), omitting speaker stats")
         return ""
     if not isinstance(data, dict):
-        logger.warning("speakers.json is not an object — omitting speaker stats")
+        logger.warning("speakers.json is not an object, omitting speaker stats")
         return ""
     return json.dumps(strip_diagnostic_keys(data), ensure_ascii=False, indent=2)

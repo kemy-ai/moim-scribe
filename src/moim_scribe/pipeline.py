@@ -253,7 +253,7 @@ def classify_audio(path: Path) -> bool:
     if probe.returncode == 0 and probe.stdout.strip() == "audio":
         # This log line is the reason the function exists: the user has to learn
         # that an extension went missing, or it happens again.
-        logger.info(f"audio with no usable extension — processing anyway: {path.name}")
+        logger.info(f"audio with no usable extension, processing anyway: {path.name}")
         return True
     return False
 
@@ -286,12 +286,12 @@ def _prefetch(path: Path) -> int | None:
     except OSError as e:
         # Not fatal: the checks below decide. A stub that cannot be read yet just
         # gets skipped this pass, exactly as before.
-        logger.info(f"prefetch skipped ({type(e).__name__}) — continuing: {path.name}")
+        logger.info(f"prefetch skipped ({type(e).__name__}), continuing: {path.name}")
         return None
     elapsed = time.time() - t0
     if elapsed > PREFETCH_SLOW_SEC:
         logger.info(
-            f"prefetch of {path.name} took {elapsed:.0f}s (cloud download) — "
+            f"prefetch of {path.name} took {elapsed:.0f}s (cloud download), "
             "the pipeline was held for that time"
         )
     return n_read
@@ -777,7 +777,7 @@ def process_recording(
         # back to inferring the attendee count from the conversation — the one
         # thing the lens forbids — and the finished output looks entirely normal.
         logger.warning(
-            "speaker stats block omitted — the summary will have no measured attendee count"
+            "speaker stats block omitted, the summary will have no measured attendee count"
         )
     ctx_block = build_block(cfg.packs_dir, title, cfg.language)
 

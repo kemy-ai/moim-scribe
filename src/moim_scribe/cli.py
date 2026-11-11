@@ -120,6 +120,24 @@ def _cfg(ws: str | None) -> Config:
     return load_config(path)
 
 
+def harden_streams() -> None:
+    """Make sure printing can never raise UnicodeEncodeError.
+
+    A Windows console speaks a legacy code page (cp949 on Korean Windows,
+    cp1252 on Western ones). Python refuses to print a character that page
+    lacks, and this tool prints things it does not control: file names,
+    speaker names, and lines of transcript in `verify`. On a clean Korean
+    Windows install `verify` computed its result and then died printing one
+    dash. The encoding is left as it is (so text the console can show still
+    shows); only the error handling changes, to a visible escape.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except (AttributeError, ValueError, OSError):
+            pass  # not a text stream we can reconfigure (redirected or replaced)
+
+
 def _setup_logging(verbose: bool) -> None:
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
@@ -739,6 +757,7 @@ def main(argv: list[str] | None = None) -> int:
                         "each gated model (network)")
     p.set_defaults(func=cmd_doctor)
 
+    harden_streams()
     args = ap.parse_args(argv)
     if args.command == "init":
         args.language_given = args.language is not None

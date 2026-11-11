@@ -110,6 +110,6 @@ def scan(
                 break
     print(
         f"\n{sus} suspicious block(s) (margin {margin}+). "
-        "Confirm via transcript evidence or a human — never from embeddings alone."
+        "Confirm via transcript evidence or a human, never from embeddings alone."
     )
     return sus

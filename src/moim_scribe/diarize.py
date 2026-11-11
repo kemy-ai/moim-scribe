@@ -530,7 +530,7 @@ def identify_speakers(
     from .speakers.embed import cosine_similarity, extract_embedding_from_segments
 
     if not db_embeddings:
-        logger.info("fingerprint DB empty — skipping identification (labels stay SPEAKER_NN)")
+        logger.info("fingerprint DB empty, skipping identification (labels stay SPEAKER_NN)")
         return merged, {}, {}
 
     by_speaker: dict[str, list[tuple[float, float]]] = {}
@@ -541,7 +541,7 @@ def identify_speakers(
         # Count, not the roll call. These are the names of everyone whose voice
         # is enrolled, most of whom have nothing to do with this recording, and
         # a log file outlives the run and gets pasted into bug reports.
-        f"identifying speakers… ({len(db_embeddings)} enrolled)"
+        f"identifying speakers... ({len(db_embeddings)} enrolled)"
     )
 
     mapping: dict[str, str] = {}
@@ -825,7 +825,7 @@ def detect_and_fix_merged_speakers(
         anchor_names |= set(d["winners"])
     anchor_names &= set(db.keys())
     if len(anchor_names) < 2:
-        logger.info("merge suspected but fewer than 2 anchors — keeping labels")
+        logger.info("merge suspected but fewer than 2 anchors, keeping labels")
         return merged, info
 
     info["anchors"] = sorted(anchor_names)
@@ -833,7 +833,7 @@ def detect_and_fix_merged_speakers(
         # Count, not names. The anchor set is assembled by comparing against the
         # whole enrolment DB, so it can list people who were never in this
         # recording — the worst names to leave sitting in a log.
-        f"enrollment reassignment triggered — {len(info['anchors'])} anchors "
+        f"enrollment reassignment triggered, {len(info['anchors'])} anchors "
         f"(re-checking all {len(merged)} segments)"
     )
 
@@ -860,7 +860,7 @@ def detect_and_fix_merged_speakers(
             # Count, not names, for the same reason as the trigger line above.
             f"presence unconfirmed for {len(unconfirmed)}/{len(anchor_names)} anchors "
             f"(fewer than {ANCHOR_PRESENCE_MIN_SEGS} segments at >= "
-            f"{ANCHOR_PRESENCE_MIN_SIM} similarity) — reassignment withheld, labels kept"
+            f"{ANCHOR_PRESENCE_MIN_SIM} similarity), reassignment withheld, labels kept"
         )
         return merged, info
 
@@ -1106,7 +1106,7 @@ def identify_and_repair(
     t3 = time.time()
     db = speaker_db.load_all_embeddings()
     if not db:
-        logger.info("fingerprint DB empty — skipping identification")
+        logger.info("fingerprint DB empty, skipping identification")
     else:
         try:
             # Identification failing must never kill transcription — absorb
@@ -1115,7 +1115,7 @@ def identify_and_repair(
             sr = 16000
             merged, id_mapping, id_sims = identify_speakers(wav, sr, merged, db, model_dir)
         except Exception as e:  # noqa: BLE001 — pipeline must finish
-            logger.warning(f"identification failed — keeping SPEAKER_NN labels: {type(e).__name__}: {e}")
+            logger.warning(f"identification failed, keeping SPEAKER_NN labels: {type(e).__name__}: {e}")
     logger.info(f"  identification took {time.time() - t3:.0f}s")
 
     if id_mapping:
@@ -1125,7 +1125,7 @@ def identify_and_repair(
                 wav, sr, merged, raw_labels, id_mapping, db, model_dir
             )
         except Exception as e:  # noqa: BLE001 — pipeline must finish
-            logger.warning(f"merge detection failed — keeping labels: {type(e).__name__}: {e}")
+            logger.warning(f"merge detection failed, keeping labels: {type(e).__name__}: {e}")
         status = "merge detection (triggered)" if merge_info.get("triggered") else "merge detection (clean)"
         logger.info(f"  {status} took {time.time() - t4:.0f}s")
 
@@ -1173,7 +1173,7 @@ def run_diarization(
         prefix = ""
 
     t0 = time.time()
-    logger.info("preparing audio…")
+    logger.info("preparing audio...")
     audio = prepare_audio(input_path, session)
     logger.info(f"  audio ready in {time.time() - t0:.0f}s")
 
@@ -1224,7 +1224,7 @@ def run_diarization(
         # parallel. They share the GPU, so each is slower than solo, but the total
         # beats sequential.
         t1 = time.time()
-        logger.info(f"transcription ∥ diarization starting (speakers={num_spk or 'auto'})")
+        logger.info(f"transcription + diarization starting (speakers={num_spk or 'auto'})")
         from concurrent.futures import ThreadPoolExecutor
 
         def _timed_diarize():

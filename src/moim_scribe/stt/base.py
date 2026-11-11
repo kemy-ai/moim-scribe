@@ -57,7 +57,7 @@ def get_backend(name: str, model: str | None = None) -> STTBackend:
         # matched before this function is called. Saying so here is what keeps a
         # typo from quietly transcribing locally under a cloud setting.
         raise ValueError(
-            "'soniox' is not a whisper backend and is dispatched separately — "
+            "'soniox' is not a whisper backend and is dispatched separately, "
             f"got {name!r}; write exactly 'soniox' in config.yaml"
         )
     raise ValueError(

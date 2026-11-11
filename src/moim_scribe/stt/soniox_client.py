@@ -105,7 +105,7 @@ def get_api_key(workspace: Path, arg_key: str | None = None) -> str:
         return key
     raise SonioxKeyMissing(
         "No Soniox API key found. Set SONIOX_API_KEY or create "
-        f"{p}. See docs/setup-soniox.md — or set stt_backend: mlx in config.yaml "
+        f"{p}. See docs/setup-soniox.md, or set stt_backend: mlx in config.yaml "
         "to transcribe locally instead."
     )
 
@@ -168,7 +168,7 @@ def _request(method: str, url: str, key: str, timeout: float,
                 raise
             wait = _retry_wait_seconds(attempt)
             logger.warning(
-                f"network error ({type(e).__name__}) — retrying in {wait:.0f}s "
+                f"network error ({type(e).__name__}), retrying in {wait:.0f}s "
                 f"({attempt + 1}/{max_retries}): {method} {url}"
             )
             time.sleep(wait)
@@ -178,7 +178,7 @@ def _request(method: str, url: str, key: str, timeout: float,
         if _is_retryable(status) and attempt < max_retries:
             wait = _retry_wait_seconds(attempt)
             logger.warning(
-                f"HTTP {status} — retrying in {wait:.0f}s "
+                f"HTTP {status}, retrying in {wait:.0f}s "
                 f"({attempt + 1}/{max_retries}): {method} {url}"
             )
             time.sleep(wait)
@@ -280,7 +280,7 @@ def upload_file(path: str, base_url: str, key: str) -> str:
                 raise
             wait = _retry_wait_seconds(attempt)
             logger.warning(
-                f"upload network error ({type(e).__name__}) — retrying in "
+                f"upload network error ({type(e).__name__}), retrying in "
                 f"{wait:.0f}s ({attempt + 1}/{MAX_RETRIES}); if the response was "
                 "merely lost, an orphan upload may be holding quota"
             )
@@ -292,7 +292,7 @@ def upload_file(path: str, base_url: str, key: str) -> str:
 
         if _is_retryable(status) and attempt < MAX_RETRIES:
             wait = _retry_wait_seconds(attempt)
-            logger.warning(f"upload HTTP {status} — retrying in {wait:.0f}s "
+            logger.warning(f"upload HTTP {status}, retrying in {wait:.0f}s "
                            f"({attempt + 1}/{MAX_RETRIES})")
             time.sleep(wait)
             attempt += 1
@@ -337,7 +337,7 @@ def create_transcription(file_id: str, base_url: str, key: str,
     except OSError:
         logger.error(
             "the response was lost, but the transcription may already exist on "
-            "the server — check https://console.soniox.com for a duplicate of "
+            "the server, check https://console.soniox.com for a duplicate of "
             "this file before re-running"
         )
         raise
@@ -375,7 +375,7 @@ def wait_for_completion(transcription_id: str, base_url: str, key: str,
             last_status = state
             last_heartbeat = now
         elif now - last_heartbeat >= HEARTBEAT_SEC:
-            logger.info(f"  waiting… status={state} ({elapsed:.0f}s)")
+            logger.info(f"  waiting... status={state} ({elapsed:.0f}s)")
             last_heartbeat = now
 
         if state == "completed":
@@ -494,13 +494,13 @@ def cleanup(file_id: str | None, transcription_id: str | None,
             if status == 409 and attempt < CLEANUP_409_RETRIES:
                 attempt += 1
                 logger.info(
-                    f"  transcription still processing (409) — retrying delete in "
+                    f"  transcription still processing (409), retrying delete in "
                     f"{CLEANUP_409_RETRY_INTERVAL_SEC:.0f}s ({attempt}/{CLEANUP_409_RETRIES})"
                 )
                 time.sleep(CLEANUP_409_RETRY_INTERVAL_SEC)
                 continue
             logger.warning(
-                f"DELETE FAILED (HTTP {status}) — remove transcription "
+                f"DELETE FAILED (HTTP {status}), remove transcription "
                 f"{transcription_id} by hand at https://console.soniox.com, or it "
                 "stays on their servers and counts against your quota"
             )
@@ -517,7 +517,7 @@ def cleanup(file_id: str | None, transcription_id: str | None,
             logger.info(f"  deleted remote file {file_id}")
         else:
             logger.warning(
-                f"DELETE FAILED (HTTP {status}) — remove file {file_id} by hand at "
+                f"DELETE FAILED (HTTP {status}), remove file {file_id} by hand at "
                 "https://console.soniox.com; uploads are not auto-deleted and the "
                 "organization cap is 10 GB / 1,000 files"
             )

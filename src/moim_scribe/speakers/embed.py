@@ -46,7 +46,7 @@ def get_model(model_dir: Path):
     import torch  # noqa: F401  (ensures a clear error if torch is missing)
     from speechbrain.inference.speaker import EncoderClassifier
 
-    logger.info("loading ECAPA-TDNN speaker embedding model…")
+    logger.info("loading ECAPA-TDNN speaker embedding model...")
     _model = EncoderClassifier.from_hparams(
         source="speechbrain/spkrec-ecapa-voxceleb",
         savedir=str(model_dir),

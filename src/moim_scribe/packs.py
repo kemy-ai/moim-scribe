@@ -88,7 +88,7 @@ def find_matching_pack(packs_dir: Path, title: str) -> Path | None:
         try:
             spec = json.loads(match_path.read_text(encoding="utf-8"))
         except Exception as e:  # noqa: BLE001 — one bad pack must not break matching
-            logger.warning(f"match.json unreadable — skipped: {match_path} ({type(e).__name__}: {e})")
+            logger.warning(f"match.json unreadable, skipped: {match_path} ({type(e).__name__}: {e})")
             continue
         if not isinstance(spec, dict):
             continue
@@ -119,7 +119,7 @@ def _read_text_safe(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8").strip()
     except Exception as e:  # noqa: BLE001 — one broken file must not break the block
-        logger.warning(f"unreadable — skipped: {path} ({type(e).__name__}: {e})")
+        logger.warning(f"unreadable, skipped: {path} ({type(e).__name__}: {e})")
         return ""
 
 
@@ -149,7 +149,7 @@ def build_block(packs_dir: Path, title: str, language: str = "ko") -> str:
             parts.append(content)
 
     if not parts:
-        logger.info(f"pack '{pack_dir.name}' has no loadable content — block skipped")
+        logger.info(f"pack '{pack_dir.name}' has no loadable content, block skipped")
         return ""
 
     header = HEADER[lang]
@@ -163,7 +163,7 @@ def build_block(packs_dir: Path, title: str, language: str = "ko") -> str:
     reserved = len(rules) + len(tail) + 2
     budget = max(MAX_BLOCK_CHARS - reserved, len(header) + 1)
     head_part = f"{header}\n{body}"[:budget].rstrip()
-    logger.info(f"background {len(full)} chars over {MAX_BLOCK_CHARS} cap — truncated")
+    logger.info(f"background {len(full)} chars over {MAX_BLOCK_CHARS} cap, truncated")
     return f"{head_part}{tail}\n\n{rules}"
 
 
@@ -207,7 +207,7 @@ def build_card(title: str, out_md_path: str | Path) -> str:
     try:
         text = Path(out_md_path).read_text(encoding="utf-8")
     except Exception as e:  # noqa: BLE001
-        logger.warning(f"result unreadable — header-only card: {out_md_path} ({type(e).__name__}: {e})")
+        logger.warning(f"result unreadable, header-only card: {out_md_path} ({type(e).__name__}: {e})")
         return header + "\n"
 
     sections = _extract_sections(text)
