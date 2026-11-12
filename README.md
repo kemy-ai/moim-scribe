@@ -15,7 +15,8 @@ By default the summary step sends the transcript to Anthropic through Claude Cod
 ```mermaid
 flowchart TD
     subgraph machine["on your machine"]
-        A["inbox/<br>recording lands"] --> B["transcribe + diarize<br>whisper (mlx / faster) + pyannote<br>(soniox: its text + pyannote boundaries)"]
+        A["inbox/<br>recording lands"] --> W["wait for the head count (up to 3 min)<br>skipped when the file name or config has one<br>starts as soon as you give it, else estimates"]
+        W --> B["transcribe + diarize<br>whisper (mlx / faster) + pyannote<br>(soniox: its text + pyannote boundaries)"]
         FP[("speaker fingerprints<br>grow every session")] <--> B
         B --> C["summarize<br>one summary lens for every recording<br>(+ your background pack, if any)"]
         C --> D["results/<br>summary md + diarized transcript"]
