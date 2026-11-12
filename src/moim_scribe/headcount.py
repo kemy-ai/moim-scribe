@@ -572,10 +572,13 @@ def _listed(recording: Path, recs: list[Path]) -> Path | None:
     """The entry of `recs` that is the file `recording`, as the scan lists it.
 
     On a case-insensitive file system "STANDUP.M4A" opens "standup.m4a", but
-    the scan keys its records by the listed name.
+    the scan keys its records by the listed name. Always the entry itself:
+    on Windows, paths compare equal regardless of case, so `recording in
+    recs` holds for "STANDUP.M4A" while its spelling is not the listed one.
     """
-    if recording in recs:
-        return recording
+    for f in recs:
+        if f == recording:
+            return f
     return next((f for f in recs if _same_file(f, recording)), None)
 
 
@@ -626,7 +629,8 @@ def record_count(cfg: Config, recording: Path, speakers: int,
 
 def clear_count(cfg: Config, recording: Path) -> bool:
     """Forget a count given for `recording`. True if there was one."""
-    path = headcount_dir(cfg) / f"{record_key(recording_name(cfg, Path(recording)))}{COUNT_SUFFIX}"
+    recording = _listed(Path(recording), inbox_recordings(cfg)) or Path(recording)
+    path = headcount_dir(cfg) / f"{record_key(recording_name(cfg, recording))}{COUNT_SUFFIX}"
     existed = path.exists()
     _unlink(path)
     return existed and not path.exists()

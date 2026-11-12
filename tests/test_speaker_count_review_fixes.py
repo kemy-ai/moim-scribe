@@ -272,6 +272,57 @@ def test_f4_record_count_uses_the_listed_entry_for_the_same_file(ws, monkeypatch
     assert headcount.given_count(ws, "standup.m4a") == 4
 
 
+class _NoCasePath(type(Path())):
+    """A path that compares and hashes like a Windows path: case does not
+    matter. Lets the Windows behaviour be tested on every system."""
+
+    def __eq__(self, other):
+        return isinstance(other, Path) and str(self).casefold() == str(other).casefold()
+
+    def __hash__(self):
+        return hash(str(self).casefold())
+
+    def is_file(self, *a, **k):
+        return True                     # the case-insensitive file system opens it
+
+
+def _no_case(path: Path) -> Path:
+    return _NoCasePath(str(path))
+
+
+def _windows_like(monkeypatch):
+    """headcount builds its paths as _NoCasePath, and no file is the same as
+    another by identity: only the Windows equality can match a variant."""
+    monkeypatch.setattr(headcount, "Path", _NoCasePath)
+    monkeypatch.setattr(headcount.os.path, "samefile", lambda a, b: False)
+
+
+def test_w1_a_path_equal_to_a_listed_one_gives_the_listed_entry(ws):
+    rec = _audio(ws.inbox_dir / "standup.m4a")
+    variant = _no_case(ws.inbox_dir / "STANDUP.M4A")
+    assert variant == rec                               # as on Windows
+    got = headcount._listed(variant, [rec])
+    assert got is rec and got.name == "standup.m4a"
+
+
+def test_w1_record_count_keys_a_windows_equal_path_by_the_listed_name(ws, monkeypatch):
+    rec = _audio(ws.inbox_dir / "standup.m4a")
+    _windows_like(monkeypatch)
+    monkeypatch.setattr(headcount, "inbox_recordings", lambda cfg, **k: [rec])
+    got = headcount.record_count(ws, _no_case(ws.inbox_dir / "STANDUP.M4A"), 4)
+    assert got.name == "standup.m4a" and got.path is rec
+    assert headcount.given_count(ws, "standup.m4a") == 4
+
+
+def test_w1_clear_count_finds_the_record_from_a_windows_equal_path(ws, monkeypatch):
+    rec = _audio(ws.inbox_dir / "standup.m4a")
+    _windows_like(monkeypatch)
+    monkeypatch.setattr(headcount, "inbox_recordings", lambda cfg, **k: [rec])
+    headcount.record_count(ws, rec, 4)
+    assert headcount.clear_count(ws, _no_case(ws.inbox_dir / "STANDUP.M4A")) is True
+    assert headcount.given_count(ws, "standup.m4a") is None
+
+
 # --- F6: the record folder keeps itself out of git ----------------------------
 
 def test_f6_the_record_folder_ignores_itself(ws):
