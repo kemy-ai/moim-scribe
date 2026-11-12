@@ -1,6 +1,7 @@
 """moim-scribe command line interface.
 
-    moim-scribe init [workspace]        create a workspace skeleton (or repair one)
+    moim-scribe init [workspace]        create a workspace skeleton (or repair one);
+                                        adds the CLAUDE.md guide if there is none
     moim-scribe watch [workspace]       watch the inbox and process recordings
     moim-scribe scan-inbox [workspace]  one inbox pass (for cron / Task Scheduler);
                                         waits for a speaker count unless --no-wait
@@ -26,6 +27,8 @@ import time
 import unicodedata
 from pathlib import Path
 from urllib.parse import urlsplit
+
+import yaml
 
 from . import __version__
 from . import preflight as _preflight
@@ -212,6 +215,39 @@ def _copy_shipped_files(packs_dir: Path, announce: bool, examples: bool) -> None
             (dst_pack / item.name).write_text(item.read_text(encoding="utf-8"), encoding="utf-8")
 
 
+def _guide_language(ws: Path, requested: str, language_given: bool, wrote: bool) -> str:
+    """The language for CLAUDE.md: "en" or "ko".
+
+    An explicit --language wins. Without it, a config.yaml that was kept as it
+    is decides (a rerun on an English workspace must not add a Korean guide);
+    a config.yaml that was just written holds `requested` anyway. Anything
+    that is not "en" gets the Korean guide, as the lens files' default does.
+    """
+    lang = requested
+    if not language_given and not wrote:
+        try:
+            loaded = yaml.safe_load((ws / CONFIG_NAME).read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            loaded = None
+        if isinstance(loaded, dict) and loaded.get("language"):
+            lang = str(loaded["language"])
+    return "en" if lang.strip().lower() == "en" else "ko"
+
+
+def _install_guide_file(ws: Path, language: str) -> None:
+    """Put the CLAUDE.md guide for Claude Code in the workspace, only if absent.
+
+    An existing CLAUDE.md (even a dangling link) may be the user's own file,
+    so it is never replaced, not even by --reset-config.
+    """
+    dst = ws / "CLAUDE.md"
+    if dst.exists() or dst.is_symlink():
+        return
+    src = importlib.resources.files("moim_scribe") / "templates" / "workspace" / f"CLAUDE.{language}.md"
+    dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    print(f"  added CLAUDE.md ({language}): tells Claude Code how to take a speaker count here")
+
+
 def _free_backup_name(cfg_path: Path) -> Path:
     """config.yaml.bak, or the first of .bak.2, .bak.3, ... that does not exist.
 
@@ -276,6 +312,7 @@ def cmd_init(args) -> int:
     skeleton = Config(workspace=ws)
     ensure_workspace_dirs(skeleton)
     _copy_shipped_files(skeleton.packs_dir, announce=existed, examples=not existed)
+    _install_guide_file(ws, _guide_language(ws, args.language, language_given, wrote))
     # A workspace-local safety net in case the user ever runs `git init` here.
     _repair_gitignore(ws)
     # Raises ConfigError for a config.yaml that cannot be used: the one the

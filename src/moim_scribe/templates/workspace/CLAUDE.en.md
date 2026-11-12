@@ -6,9 +6,9 @@ This folder is a moim-scribe workspace. Recordings dropped into `inbox/` are tur
 
 A recording whose file name has no head count waits in `inbox/` for a few minutes so the user can give one. If the user says something like "the one I just added had 4 people":
 
-1. Run `moim-scribe waiting`. It lists the recordings that are waiting, and prints nothing when none is.
-2. Run `moim-scribe count 4`. If more than one is waiting, or the user named a recording, add part of its file name: `moim-scribe count 4 "part of the name"`.
-3. Tell the user the result in one line.
+1. Run `moim-scribe waiting`. It lists the recordings that are waiting, one per line: the file name, a tab, then the time left (`3:00 left`), or `not scanned yet` for a file the inbox check has not reached yet (its wait starts when it does). It prints nothing when none is waiting.
+2. Run `moim-scribe count 4`. If two or more are waiting, `count` does not record anything: it prints the list and exits with an error. Ask the user which recording it is, then add part of its file name: `moim-scribe count 4 "part of the name"`. Do the same when the user named a recording.
+3. Tell the user the result in one line. If `count` ended with an error (exit status 1), do not say it worked: pass on what it printed.
 
 If it is not clear which recording they mean, ask before running `count`. If nothing is waiting, say so; do not guess.
 
