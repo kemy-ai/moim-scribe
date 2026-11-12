@@ -98,7 +98,7 @@ pyannote and speechbrain are PyTorch and run everywhere (CUDA, MPS, CPU). The wa
 | `faster` (default elsewhere) | your machine | pyannote, locally | same |
 | `soniox` | Soniox's servers — **the audio is uploaded** | Soniox, or pyannote locally if you have a token | no model download required. Needs an API key and is billed per hour of audio |
 
-`soniox` is fast and accurate **when people take turns speaking**; on a noisy recording where several people talked over each other, testing found it fusing distinct speakers into one. If a Hugging Face token is present, moim-scribe fixes that by keeping Soniox's text and re-deriving the speaker boundaries with pyannote locally — on by default, skipped silently without a token, and the only way a speaker count (from the filename, or one you give) does anything on this path. Soniox alone accepts no count: diarization is a single on/off switch that detects up to 15 speakers by itself. A single file is capped at 300 minutes.
+`soniox` is fast and accurate **when people take turns speaking**; on a noisy recording where several people talked over each other, testing found it fusing distinct speakers into one. If a Hugging Face token is present, moim-scribe fixes that by keeping Soniox's text and re-deriving the speaker boundaries with pyannote locally — on by default, skipped silently without a token, and the only way a speaker count (from the filename, or one you give) changes the speaker separation on this path. Soniox alone accepts no count: diarization is a single on/off switch that detects up to 15 speakers by itself. Without the hybrid step, a count you give is not used for separation and only goes into the summary's attendee line. A single file is capped at 300 minutes.
 
 Setup and the quota you have to manage: [docs/setup-soniox.md](docs/setup-soniox.md).
 
@@ -199,8 +199,8 @@ The number of people is the biggest help to speaker separation (see "What to exp
 2. If not, the recording stays where it is and waits up to **3 minutes**.
 3. In that time, give the count in one of two ways:
    - Tell Claude, with Claude Code open in the workspace folder: "the one I just added had 4 people". `init` puts a `CLAUDE.md` in the workspace that tells Claude what to do.
-   - Or run `moim-scribe count 4` yourself. If several recordings wait, add part of a file name: `moim-scribe count 4 "team sync"`.
-4. Once you give it, the recording starts at the next pass over the inbox. If you do not, it starts after the 3 minutes with an estimated count, and the summary says the count is estimated. A count from the file name, from you, from the start of the recording or from `default_speakers` is written as fixed; only a guess is marked as estimated.
+   - Or run `moim-scribe count 4` yourself. If one recording is waiting, that is the one. If two or more are waiting, add part of a file name: `moim-scribe count 4 "team sync"`.
+4. Once you give it, the recording starts within a few seconds. If you do not, it starts after the 3 minutes with an estimated count, and the summary says the count is estimated. A count from the file name, from you, from the start of the recording or from `default_speakers` is written as fixed; only a guess is marked as estimated.
 
 ```
 $ moim-scribe waiting
@@ -210,11 +210,17 @@ recorded 4 speakers for team-sync.m4a
 it is processed on the next inbox pass
 ```
 
-- `moim-scribe waiting` lists what is waiting, one line each, and prints nothing when nothing waits.
+"The next inbox pass" is the next check of the inbox. While a recording waits, `watch` and `scan-inbox` check about every 2 seconds, so the start follows within a few seconds.
+
+- `moim-scribe waiting` lists what is waiting, one line each: the file name, a tab, and the time left (`3:00 left`). `not scanned yet` instead of a time means the inbox check has not reached that file yet; its wait starts when it does. It prints nothing when nothing waits.
+- **Two or more recordings waiting.** A `count` without a name is then not recorded (it exits with status 1): it shows the list and asks you to name the one it is for, `moim-scribe count 4 <part of its name>`. With none waiting it says so. A file that is still being copied, or is damaged, counts as waiting too, so while one is in `inbox/` you need to name the recording.
+- The name can be a part of the file name or a path: `moim-scribe count 4 inbox/team-sync.m4a`. A path outside `inbox/` is refused.
 - If the file name already has a count, the file name wins over the one you give.
-- `watch` looks at the inbox every 60 seconds, so after you give a count it can take up to a minute to start. `scan-inbox` waits in place, up to 3 minutes, and says so on screen; `--no-wait` makes it process at once instead.
+- **Renaming or moving a waiting recording starts it over.** moim-scribe sees a renamed file, or one moved into a subfolder, as a new recording: its wait begins again and a count you already gave is gone. Give the count after you have settled the name.
+- `watch` and `scan-inbox` both start a recording within a few seconds of the count arriving. `scan-inbox` waits in place, up to 3 minutes in all (not 3 minutes plus the time `watch` would add), and says so on screen; `--no-wait` makes it process at once instead. Ctrl-C while it waits puts everything back in `inbox/` (exit status 130). If a `watch` is already processing `inbox/`, `scan-inbox` stops and leaves the recordings to it.
 - The wait is `speaker_count_wait_sec` in `config.yaml`: 180 by default, 0 for no wait (what 0.2.0 did). If you run `scan-inbox` from cron or Task Scheduler, use `--no-wait` or 0.
-- A count said aloud at the start of the recording is only known after transcription, so such a recording waits the 3 minutes too.
+- A count said aloud at the start of the recording is only known after transcription, so such a recording waits the 3 minutes too. (With `stt_backend: soniox` a spoken count and `default_speakers` are not used at all.)
+- **With `stt_backend: soniox`** and no Hugging Face token, Soniox separates the speakers itself and takes no count, so the count you give does not change the separation: it only goes into the summary's attendee line (as a fixed number, not an estimate). If that line does not matter to you, set `speaker_count_wait_sec: 0` and skip the wait. See [docs/setup-soniox.md](docs/setup-soniox.md).
 - To get a Slack message when a recording waits, see [docs/notify-slack.md](docs/notify-slack.md). It is optional and nothing is connected by default.
 
 ## Teaching it who is who

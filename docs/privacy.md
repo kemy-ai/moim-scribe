@@ -81,7 +81,7 @@ can name speakers automatically — is everyone OK with that?"
   `.moim-scribe-headcount/` with up to two tiny files per recording: the
   recording's path inside `inbox/` (which includes its file name), the time the
   program first saw it, and the count you gave. It stays on your machine and is
-  covered by the workspace `.gitignore`. The files are deleted when the
+  covered by the workspace `.gitignore`. The folder also holds a `.gitignore` of its own that excludes everything in it, so it stays out of Git even in a workspace made by 0.2.0. The files are deleted when the
   recording is picked up for processing, and any left for a recording that is no
   longer in `inbox/` are removed at the next pass over the inbox.
 - **Deletion is simple.** Delete `<workspace>/speakers/<name>.npy` and the

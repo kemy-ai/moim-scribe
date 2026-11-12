@@ -8,8 +8,8 @@ moim-scribe has no Slack connection built in. If you want a Slack message when a
 
 | command | what it does |
 |---|---|
-| `moim-scribe waiting` | prints one line per recording that is waiting for a speaker count: the file name, a tab, and the time left (for example `team-sync.m4a` then `3:00 left`). With nothing waiting it prints nothing on stdout (a note goes to stderr). It always exits 0 |
-| `moim-scribe count <N> [recording]` | gives the speaker count. Without `recording` it applies to the most recent waiting recording; with part of a file name it finds that one. Use `--workspace DIR` to name the workspace folder |
+| `moim-scribe waiting` | prints one line per recording that is waiting for a speaker count: the file name, a tab, and the time left (for example `team-sync.m4a` then `3:00 left`, or `not scanned yet` for a file the inbox check has not reached). A tab or line break inside a file name is shown as `\t` or `\n`. With nothing waiting it prints nothing on stdout (a note goes to stderr). It always exits 0 |
+| `moim-scribe count <N> [recording]` | gives the speaker count. Without `recording` it applies to the waiting recording when exactly one is waiting; with two or more waiting it records nothing, lists them and asks you to name one. `recording` can be part of a file name or a path inside `inbox/`. Use `--workspace DIR` to name the workspace folder |
 
 ## Step 1: get a Slack Incoming Webhook
 
@@ -41,15 +41,19 @@ if [ -z "$waiting" ]; then
     exit 0
 fi
 
-# One key per waiting recording: its file name, the part of the line before the tab.
-# The countdown after the tab changes on every call, so it is not part of the key:
-# a recording is announced once while it waits.
+# One key per waiting recording: its file name, the line without what follows its
+# LAST tab ("3:00 left" or "not scanned yet"). `moim-scribe waiting` writes a tab or
+# line break inside a file name as \t or \n, so that last tab is always the separator.
+# The countdown changes on every call, so it is not part of the key: a recording is
+# announced once while it waits.
+TAB=$(printf '\t')
 old=""
 [ -f "$STATE" ] && old=$(cat "$STATE")
 now_keys=""
 new_lines=""
 while IFS= read -r line; do
-    key=$(printf '%s' "$line" | cut -f 1 | cksum | cut -d ' ' -f 1)
+    name=${line%"$TAB"*}
+    key=$(printf '%s' "$name" | cksum | cut -d ' ' -f 1)
     now_keys="$now_keys$key
 "
     if ! printf '%s\n' "$old" | grep -qx "$key"; then
@@ -115,6 +119,6 @@ A recording waits 3 minutes by default. If a message has to reach you and you ha
 speaker_count_wait_sec: 600
 ```
 
-`watch` checks the inbox every 60 seconds, so after you give a count it can take up to a minute to start.
+While a recording waits, `watch` checks the inbox about every 2 seconds, so a count you give starts it within a few seconds.
 
-If you run `scan-inbox` from a scheduler, give it `--no-wait` or set `speaker_count_wait_sec: 0`; otherwise each run waits in place (see [deployment.md](deployment.md)).
+A long wait has a cost for `scan-inbox`: it waits in place, so if you run it from a scheduler every run can take that long (600 seconds here). Use `watch` instead, or give the scheduled `scan-inbox` the `--no-wait` option (or set `speaker_count_wait_sec: 0`); see [deployment.md](deployment.md).

@@ -19,15 +19,19 @@ if [ -z "$waiting" ]; then
     exit 0
 fi
 
-# One key per waiting recording: its file name, the part of the line before the tab.
-# The countdown after the tab changes on every call, so it is not part of the key:
-# a recording is announced once while it waits.
+# One key per waiting recording: its file name, the line without what follows its
+# LAST tab ("3:00 left" or "not scanned yet"). `moim-scribe waiting` writes a tab or
+# line break inside a file name as \t or \n, so that last tab is always the separator.
+# The countdown changes on every call, so it is not part of the key: a recording is
+# announced once while it waits.
+TAB=$(printf '\t')
 old=""
 [ -f "$STATE" ] && old=$(cat "$STATE")
 now_keys=""
 new_lines=""
 while IFS= read -r line; do
-    key=$(printf '%s' "$line" | cut -f 1 | cksum | cut -d ' ' -f 1)
+    name=${line%"$TAB"*}
+    key=$(printf '%s' "$name" | cksum | cut -d ' ' -f 1)
     now_keys="$now_keys$key
 "
     if ! printf '%s\n' "$old" | grep -qx "$key"; then

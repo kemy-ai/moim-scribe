@@ -34,8 +34,13 @@ that is already split by speaker.
   choice for a crowded recording that matters.
 - **Soniox itself cannot be told how many speakers there are.** Diarization is
   a single on/off switch and it detects up to 15 speakers by itself. A count in
-  the filename, or one you give with `moim-scribe count`, reaches pyannote when the hybrid step runs, and is dropped
-  otherwise — the log says which happened.
+  the filename, or one you give with `moim-scribe count`, reaches pyannote when the hybrid step runs. Otherwise it is
+  not used for speaker separation (the log says which happened) and only goes into the summary's attendee line,
+  as a fixed number. `default_speakers` and a count spoken at the start of the recording are not used on this path
+  at all; they belong to the local backends.
+- **The 3-minute wait for a count may not be worth it here.** Without a Hugging Face token the count changes only
+  that attendee line. If you do not need it, set `speaker_count_wait_sec: 0` in `config.yaml` so a recording
+  starts at once.
 - It costs money and has quotas you have to keep an eye on (below).
 
 ## Get a key
@@ -99,9 +104,9 @@ hybrid_diarization: true    # default
   missing `pyannote.audio` when a token is present, so you find that out before
   a recording does.
 - A speaker count in the filename (`team meeting 5p.m4a`), or one you give with
-  `moim-scribe count`, reaches pyannote here. It is the only way a count does
-  anything on this path; Soniox takes no
-  count of its own.
+  `moim-scribe count`, reaches pyannote here. It is the only way a count
+  changes the speaker separation on this path; Soniox takes no count of its
+  own.
 
 Set it to `false` to keep Soniox's labels even when pyannote is available.
 
