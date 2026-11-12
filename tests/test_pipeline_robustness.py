@@ -151,10 +151,17 @@ def test_quarantine_keeps_going_when_one_move_fails(cfg, monkeypatch, caplog):
 def test_name_fits_is_decided_by_the_filesystem(tmp_path):
     assert pipeline.name_fits(tmp_path, "short name") is True
     assert pipeline.name_fits(tmp_path, LONG_STEM) is False
-    # 40 Hangul syllables is fine in either normal form
+    # 40 Hangul syllables fit everywhere when composed (120 bytes). Decomposed
+    # they are 80 UTF-16 units, which APFS still holds, but 240 bytes, which
+    # with the work-file suffix is past the 255 bytes Linux filesystems allow.
     import unicodedata
     title = "가나다라마바사아자차" * 4
-    assert pipeline.name_fits(tmp_path, unicodedata.normalize("NFD", title)) is True
+    assert pipeline.name_fits(tmp_path, unicodedata.normalize("NFC", title)) is True
+    decomposed = unicodedata.normalize("NFD", title)
+    if sys.platform == "darwin":
+        assert pipeline.name_fits(tmp_path, decomposed) is True
+    elif sys.platform == "linux":
+        assert pipeline.name_fits(tmp_path, decomposed) is False
     assert list(tmp_path.iterdir()) == []  # the probe leaves nothing behind
 
 
