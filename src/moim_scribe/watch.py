@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from .config import AUDIO_EXTS, Config
+from .headcount import WAIT_POLL_SEC, WaitTracker
 from .pipeline import SetupReporter, scan_inbox
 
 logger = logging.getLogger("moim_scribe.watch")
@@ -50,8 +52,15 @@ def watch(cfg: Config, interval_sec: float = FALLBACK_INTERVAL_SEC) -> None:
     loop: every pass checks again, so saving the missing token or installing
     ffmpeg is enough, with no restart. Neither does an exception escaping a
     pass: it is logged and the next pass runs. Only Ctrl-C stops it.
+
+    While recordings wait for their speaker count, it also looks every
+    WAIT_POLL_SEC whether a count arrived or a wait ran out (a count is a file
+    outside inbox/, so no event announces it) and passes again at once; the
+    rule is headcount.WaitTracker, the one `scan-inbox` follows. With nothing
+    waiting it sleeps until an event or interval_sec, as before.
     """
     reporter = SetupReporter(repeat_every=SETUP_REPEAT_EVERY_PASSES)
+    tracker = WaitTracker(cfg, rescan_sec=interval_sec)
     wake = threading.Event()
     observer = Observer()
     observer.schedule(_AudioEventHandler(wake), str(cfg.inbox_dir), recursive=True)
@@ -61,8 +70,10 @@ def watch(cfg: Config, interval_sec: float = FALLBACK_INTERVAL_SEC) -> None:
     )
     try:
         while True:
+            waiting = False
             try:
-                scan_inbox(cfg, reporter=reporter)
+                result = scan_inbox(cfg, reporter=reporter)
+                waiting = isinstance(result, dict) and bool(result.get("waiting"))
             except Exception as e:  # one bad pass must not end watching
                 # scan_inbox keeps per-file failures to itself; anything that
                 # still gets out is a bug or an environment problem, and the
@@ -74,7 +85,13 @@ def watch(cfg: Config, interval_sec: float = FALLBACK_INTERVAL_SEC) -> None:
                 )
                 logger.debug("traceback of the failed pass", exc_info=True)
             wake.clear()
-            wake.wait(timeout=interval_sec)
+            if not waiting:
+                wake.wait(timeout=interval_sec)
+                continue
+            tracker.after_pass(time.time())
+            while not wake.wait(timeout=WAIT_POLL_SEC):
+                if tracker.due(time.time()):
+                    break
     except KeyboardInterrupt:
         logger.info("stopping watcher")
     finally:
