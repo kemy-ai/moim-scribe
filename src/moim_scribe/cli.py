@@ -76,6 +76,8 @@ summarizer: claude_cli
 # Speaker count when neither the filename ("... 5명" / "... 5p") nor a spoken
 # cue at the start of the recording gives one. 0 = auto-estimate.
 default_speakers: 0
+# Seconds to wait for a speaker count when the file name has none, then estimate. 0 = no wait.
+speaker_count_wait_sec: 180
 """
 
 
@@ -90,7 +92,7 @@ GITIGNORE_ENTRIES = (
     "speakers/", "*.npy", "inbox/", "results/", "models/", "packs/", "glossary.txt",
     "*.wav", "*.m4a", "*.mp3", "*.flac", "*.ogg", "*.aac", "*.opus",
     ".hf_token", ".soniox_key",
-    "_history/", ".process-*/",
+    "_history/", ".process-*/", ".moim-scribe-headcount/",
 )
 
 # Loggers that report every HTTP request at INFO (one line per request, 22 on a

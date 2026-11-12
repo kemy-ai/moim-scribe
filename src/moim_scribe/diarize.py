@@ -1185,7 +1185,10 @@ def run_diarization(
     Speaker-count priority: num_speakers argument > spoken cue in the first
     90 seconds ("참석자 다섯 명" / "five participants") > default_speakers
     (None = let pyannote estimate). Returns the speakers.json dict with an
-    extra "txt_path"/"jsonl_path" for callers.
+    extra "txt_path"/"jsonl_path" for callers, and "speaker_count_source"
+    ("given" / "spoken" / "default" / "estimated") with "speaker_count" (the
+    count used, None when estimated) so the summary can say where the
+    attendee count came from. Those two are not written to speakers.json.
     """
     if os.path.isfile(input_path):
         session = os.path.dirname(os.path.abspath(input_path)) or "."
@@ -1211,6 +1214,7 @@ def run_diarization(
 
         if num_speakers is not None:
             num_spk = num_speakers or None  # 0 -> None (pyannote auto)
+            count_source = "given" if num_spk else "estimated"
             logger.info(f"speaker count: {num_spk or 'auto'} (explicit)")
         else:
             th = time.time()
@@ -1231,6 +1235,7 @@ def run_diarization(
             logger.info(f"  head transcription for spoken cue took {time.time() - th:.0f}s")
             if detected:
                 num_spk = detected
+                count_source = "spoken"
                 # The file name beats the spoken cue, and the cue beats
                 # default_speakers, so only the file name can correct it.
                 example = "회의 4명" if language == "ko" else "meeting 4p"
@@ -1240,6 +1245,7 @@ def run_diarization(
                 )
             else:
                 num_spk = default_speakers or None
+                count_source = "default" if num_spk else "estimated"
                 if num_spk:
                     logger.info(f"no spoken cue -> default_speakers {num_spk}")
                 else:
@@ -1305,4 +1311,6 @@ def run_diarization(
     speakers_json["txt_path"] = out_txt
     speakers_json["jsonl_path"] = out_jsonl
     speakers_json["stats_path"] = out_speakers
+    speakers_json["speaker_count_source"] = count_source
+    speakers_json["speaker_count"] = num_spk
     return speakers_json

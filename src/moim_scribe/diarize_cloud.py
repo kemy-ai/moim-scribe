@@ -299,4 +299,8 @@ def run_cloud_diarization(
     speakers_json["txt_path"] = out_txt
     speakers_json["jsonl_path"] = out_jsonl
     speakers_json["stats_path"] = out_speakers
+    # Same keys as run_diarization. Soniox has no spoken-cue or default step:
+    # a count is either given by the caller or estimated.
+    speakers_json["speaker_count_source"] = "given" if num_speakers else "estimated"
+    speakers_json["speaker_count"] = num_speakers or None
     return speakers_json

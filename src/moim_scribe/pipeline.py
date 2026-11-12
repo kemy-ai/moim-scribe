@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from . import headcount as _headcount
 from . import preflight as _preflight
 from .config import AUDIO_EXTS, SUMMARY_LENS, Config, normalize_folder_name
 from .diarize import PID as ENGINE_PID
@@ -57,6 +58,9 @@ PROMPT_HEADERS = {
         "rec_line": "녹음 일시: {dt}  ※ 정리의 '일시'에 이 값을 쓸 것(전사에 별도 날짜 언급이 없으면)",
         "spk_stats": "=== 화자 통계 (diarize 실측 — 참석 인원·발화 비율은 이 데이터 기준) ===",
         "spk_fixed": "※ 파일명 지정 참석 인원: {n}명 (이 값이 확정값)",
+        "spk_user": "※ 사용자가 알려준 참석 인원: {n}명 (이 값이 확정값)",
+        "spk_spoken": "※ 녹음 첫머리에서 말한 참석 인원: {n}명 (자동 추정 아님)",
+        "spk_default": "※ 설정 default_speakers로 정한 참석 인원: {n}명 (자동 추정 아님)",
         "transcript": "=== 전사본 ===",
     },
     "en": {
@@ -69,6 +73,9 @@ PROMPT_HEADERS = {
         "rec_line": "Recorded at: {dt}  (use this for the summary's date unless the transcript says otherwise)",
         "spk_stats": "=== Speaker stats (measured — use these for attendee count and talk shares) ===",
         "spk_fixed": "Note: attendee count fixed by filename: {n} (authoritative)",
+        "spk_user": "Note: attendee count given by the user: {n} (authoritative)",
+        "spk_spoken": "Note: attendee count spoken at the start of the recording: {n} (not estimated)",
+        "spk_default": "Note: attendee count set by default_speakers: {n} (not estimated)",
         "transcript": "=== Transcript ===",
     },
 }
@@ -112,6 +119,24 @@ def filename_speaker_hint(title: str, language: str) -> tuple[int | None, str]:
         cleaned = re.sub(r"\s+", " ", t[: m.start()] + " " + t[m.end():]).strip()
         return count, (cleaned or "untitled")
     return None, t
+
+
+# Where the attendee count came from -> the prompt line that states it. An
+# estimated count has no line: the lens then hedges the label count.
+COUNT_SOURCE_HEADER = {
+    "filename": "spk_fixed",
+    "user": "spk_user",
+    "spoken": "spk_spoken",
+    "default": "spk_default",
+}
+
+
+def count_note(language: str, source: str, count: int | None) -> str:
+    """The prompt line naming the attendee count and its source, or ""."""
+    key = COUNT_SOURCE_HEADER.get(source)
+    if key is None or not count:
+        return ""
+    return _headers(language)[key].format(n=count) + "\n"
 
 
 def _headers(language: str) -> dict:
@@ -645,7 +670,8 @@ class RunProgress:
 
 
 def process_recording(
-    cfg: Config, claimed: Path, *, summarize: bool = True, progress: RunProgress | None = None
+    cfg: Config, claimed: Path, *, summarize: bool = True, progress: RunProgress | None = None,
+    given_speakers: int | None = None,
 ) -> Path:
     """Run one claimed file end-to-end. Returns the primary result path.
 
@@ -655,15 +681,22 @@ def process_recording(
 
     Raises on failure; the caller decides quarantine/cleanup. When `progress`
     is given, it is kept up to date with what has been written to results/.
+
+    `given_speakers` is a count the user gave for this recording (see
+    headcount.py). A count in the file name still wins over it.
     """
     progress = progress if progress is not None else RunProgress()
     hint, title = filename_speaker_hint(claimed.stem, cfg.language)
+    hint_source = "filename" if hint else None
+    if hint is None and given_speakers:
+        hint, hint_source = given_speakers, "user"
     # The user's local date, timezone-explicit — result filenames must match
     # the day the user experienced, not the UTC day.
     date_tag = datetime.now(UTC).astimezone().strftime("%y%m%d")
     logger.info(
         f"processing: {claimed.name} (title={title}"
-        + (f", speakers={hint} from filename)" if hint else ")")
+        + (f", speakers={hint} from {'the user' if hint_source == 'user' else 'filename'})"
+           if hint else ")")
     )
 
     db = SpeakerDB(cfg.speakers_dir)
@@ -770,8 +803,14 @@ def process_recording(
     spk_stats = ""
     if rendered_stats:
         spk_stats = f"{h['spk_stats']}\n{rendered_stats}\n"
-        if hint:
-            spk_stats += h["spk_fixed"].format(n=hint) + "\n"
+        # Only an estimated count may be called an estimate. A count from the
+        # file name, from the user, spoken in the recording, or set in
+        # config.yaml gets a line saying so; the lens hedges when none is there.
+        if hint_source:
+            spk_stats += count_note(cfg.language, hint_source, hint)
+        else:
+            spk_stats += count_note(cfg.language, str(result.get("speaker_count_source")),
+                                    result.get("speaker_count"))
     else:
         # Don't let the omission be silent. Without this block the summary falls
         # back to inferring the attendee count from the conversation — the one
@@ -1107,10 +1146,74 @@ def _archive_done(cfg: Config, claimed: Path, stem: str, work_products: list[Pat
     )
 
 
-def scan_inbox(cfg: Config, *, reporter: SetupReporter | None = None) -> dict:
+def _count_gate(cfg: Config, f: Path, *, wait: bool, now: float) -> tuple[bool, int | None]:
+    """Whether `f` waits for its speaker count this pass, and the count the user gave.
+
+    Order: a count in the file name, then a count the user gave, go at once;
+    so does every recording when default_speakers is set or the wait is 0 (or
+    the caller asked not to wait). Otherwise the recording stays where it is
+    until speaker_count_wait_sec has passed since this program first saw it,
+    and is then processed with an estimated count.
+
+    Any trouble with the records (unreadable, unwritable) means no wait: a
+    recording must never be held back by a broken record, and processing it
+    now is exactly what 0.2.0 did.
+    """
+    if filename_speaker_hint(f.stem, cfg.language)[0] is not None:
+        return False, None
+    name = _headcount.recording_name(cfg, f)
+    given = _headcount.given_count(cfg, name)
+    if given is not None:
+        logger.info(f"{f.name}: speaker count {given}, given by the user")
+        return False, given
+    if not wait or cfg.default_speakers or cfg.speaker_count_wait_sec <= 0:
+        return False, None
+    try:
+        seen, created = _headcount.mark_seen(cfg, name, now)
+    except OSError as e:
+        logger.warning(f"{f.name}: cannot keep a record of the speaker count wait ({e}), "
+                       "processing it now with an estimated count")
+        return False, None
+    limit = cfg.speaker_count_wait_sec
+    if seen is None or seen > now:
+        # Unreadable record, or the clock went back: never wait on it.
+        return False, None
+    if now - seen < limit:
+        if created:
+            logger.info(
+                f"{f.name}: no speaker count in the file name, waiting up to {limit}s "
+                "for one before estimating it"
+            )
+        return True, None
+    logger.info(f"{f.name}: no speaker count given within {limit}s, estimating it")
+    return False, None
+
+
+def _prune_headcount(cfg: Config, now: float) -> None:
+    """Forget records of recordings that are no longer in the scanned folders."""
+    if not _headcount.headcount_dir(cfg).is_dir():
+        return
+    present: set[str] = set()
+    for folder in inbox_folders(cfg):
+        try:
+            entries = list(folder.iterdir())
+        except OSError:
+            # Cannot tell what is there: deleting now could drop a live record.
+            return
+        present.update(_headcount.record_key(_headcount.recording_name(cfg, f)) for f in entries)
+    _headcount.prune(cfg, present, listed_at=now)
+
+
+def scan_inbox(cfg: Config, *, reporter: SetupReporter | None = None, wait: bool = True,
+               clock=time.time) -> dict:
     """One inbox pass: preflight, stabilize, claim, process, and file the outcome.
 
-    Returns {"processed": n, "failed": n, "skipped": n}. When the pass stopped
+    Returns {"processed": n, "failed": n, "skipped": n}, plus "waiting": n
+    when n recordings were left in place to wait for their speaker count
+    (absent when none, like "setup_problems"). The wait never blocks: a
+    waiting recording is skipped and looked at again next pass. `wait=False`
+    processes such recordings now, with an estimated count unless one was
+    given. `clock` returns the current time in seconds (time.time). When the pass stopped
     on a setup problem (the lock could not be created, the preflight failed,
     or processing raised SystemExit or SetupProblem before the transcript was
     written) the dict also carries "setup_problems", a
@@ -1148,6 +1251,7 @@ def scan_inbox(cfg: Config, *, reporter: SetupReporter | None = None) -> dict:
             )
 
         quarantine_leftovers(cfg)
+        _prune_headcount(cfg, clock())
         for folder in inbox_folders(cfg):
             for f in sorted(folder.iterdir()):
                 if not f.is_file() or f.name.startswith(".") or not classify_audio(f):
@@ -1162,6 +1266,10 @@ def scan_inbox(cfg: Config, *, reporter: SetupReporter | None = None) -> dict:
                     continue
                 if not is_stable_audio(f):
                     counts["skipped"] += 1
+                    continue
+                holds, given = _count_gate(cfg, f, wait=wait, now=clock())
+                if holds:
+                    counts["waiting"] = counts.get("waiting", 0) + 1
                     continue
                 claimed = cfg.processing_dir / f.name
                 if _exists(claimed):
@@ -1178,6 +1286,10 @@ def scan_inbox(cfg: Config, *, reporter: SetupReporter | None = None) -> dict:
                     logger.info(f"SKIP claim failed (processed elsewhere?): {f.name}")
                     counts["skipped"] += 1
                     continue
+                # Claimed: its records go, so a later recording of the same
+                # name does not inherit them. Put back below if the claim is undone.
+                count_name = _headcount.recording_name(cfg, f)
+                held = _headcount.take(cfg, count_name)
 
                 stem = claimed.stem
                 if not name_fits(cfg.processing_dir, stem):
@@ -1193,14 +1305,16 @@ def scan_inbox(cfg: Config, *, reporter: SetupReporter | None = None) -> dict:
 
                 work_products = [cfg.processing_dir / f"{stem}{sfx}" for sfx in WORK_SUFFIXES]
                 progress = RunProgress()
+                extra = {"given_speakers": given} if given is not None else {}
                 try:
                     process_recording(cfg, claimed, summarize=not _is_transcript_only(cfg, folder),
-                                      progress=progress)
+                                      progress=progress, **extra)
                 except KeyboardInterrupt:
                     # The user stopped `watch` (or a one-off scan) mid-recording.
                     # Leave things as they were before this file was claimed:
                     # this run's files gone, the recording back in its folder.
                     _undo_run(cfg, work_products, progress)
+                    _headcount.restore(cfg, count_name, held, clock())
                     back = _put_back(claimed, folder)
                     if back is not None:
                         logger.warning(f"interrupted: {claimed.name} was put back as {back}")
@@ -1224,6 +1338,7 @@ def scan_inbox(cfg: Config, *, reporter: SetupReporter | None = None) -> dict:
                     # SystemExit must not escape: it would end `watch`. Undo the
                     # claim, drop this run's leftovers, stop the pass.
                     _undo_run(cfg, work_products, progress)
+                    _headcount.restore(cfg, count_name, held, clock())
                     problem = (
                         f"processing stopped on a setup problem ({e}): "
                         f"{_put_back_or_park(cfg, claimed, folder)}"

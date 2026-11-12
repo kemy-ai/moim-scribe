@@ -60,6 +60,7 @@ _SCALAR_KEYS = (
     "summarizer_model",
     "summarizer_timeout_sec",
     "default_speakers",
+    "speaker_count_wait_sec",
 )
 _KNOWN_KEYS = frozenset(_SCALAR_KEYS) | {"stt", "types"}
 
@@ -133,6 +134,11 @@ class Config:
     # one. 0 = let pyannote estimate (best for 3+ person meetings); set 2 for
     # workspaces that are mostly 1:1 conversations.
     default_speakers: int = 0
+    # Seconds a recording with no speaker count in its file name waits in
+    # inbox/ for the user to give one, counted from when the program first
+    # saw it. Then it is processed with an estimated count. 0 = no wait.
+    # No wait either when default_speakers is set.
+    speaker_count_wait_sec: int = 180
 
     @property
     def inbox_dir(self) -> Path:
@@ -210,6 +216,9 @@ def _validate(cfg: Config) -> None:
     spk = cfg.default_speakers
     if isinstance(spk, bool) or not isinstance(spk, int) or spk < 0:
         raise _bad(f"default_speakers must be a whole number >= 0, got {spk!r}")
+    wait = cfg.speaker_count_wait_sec
+    if isinstance(wait, bool) or not isinstance(wait, int) or wait < 0:
+        raise _bad(f"speaker_count_wait_sec must be a whole number of seconds >= 0, got {wait!r}")
     t = cfg.summarizer_timeout_sec
     if isinstance(t, bool) or not isinstance(t, (int, float)) or t <= 0:
         raise _bad(f"summarizer_timeout_sec must be a number > 0, got {t!r}")
