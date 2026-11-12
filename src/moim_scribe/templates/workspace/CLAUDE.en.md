@@ -10,6 +10,8 @@ A recording whose file name has no head count waits in `inbox/` for a few minute
 2. Run `moim-scribe count 4`. If two or more are waiting, `count` does not record anything: it prints the list and exits with an error. Ask the user which recording it is, then add part of its file name: `moim-scribe count 4 "part of the name"`. Do the same when the user named a recording.
 3. Tell the user the result in one line. If `count` ended with an error (exit status 1), do not say it worked: pass on what it printed.
 
+If the user is correcting a count they just gave, always run `count` with part of the recording's file name. Without a name it can land on a different recording that arrived meanwhile.
+
 If it is not clear which recording they mean, ask before running `count`. If nothing is waiting, say so; do not guess.
 
 ## Do not open the user's data unless they ask
