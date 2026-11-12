@@ -262,6 +262,32 @@ def _strip_preamble(summary: str) -> str:
     return summary
 
 
+# Files with no known extension that a probe found to be audio, as
+# (path, size, mtime_ns). Lets the frequent cheap look of a waiting loop
+# (probed_audio) skip ffprobe, and the log line below be said once per file.
+# Only "audio" is kept: a file that failed the probe may be a cloud
+# placeholder that becomes audio later without its size or time changing.
+_PROBED_AUDIO: set[tuple[str, int, int]] = set()
+_PROBED_AUDIO_MAX = 10_000
+
+
+def _probe_key(path: Path) -> tuple[str, int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return str(path), st.st_size, st.st_mtime_ns
+
+
+def probed_audio(path: Path) -> bool:
+    """classify_audio without running ffprobe: a known extension, or a file an
+    earlier probe found to be audio and that has not changed since."""
+    if path.suffix.lower() in AUDIO_EXTS:
+        return True
+    key = _probe_key(path)
+    return key is not None and key in _PROBED_AUDIO
+
+
 def classify_audio(path: Path) -> bool:
     """Decide whether a file in an inbox folder is audio we should process.
 
@@ -280,11 +306,11 @@ def classify_audio(path: Path) -> bool:
     """
     if path.suffix.lower() in AUDIO_EXTS:
         return True
-    try:
-        if path.stat().st_size == 0:
-            return False
-    except OSError:
+    key = _probe_key(path)
+    if key is None or key[1] == 0:
         return False
+    if key in _PROBED_AUDIO:
+        return True
     try:
         probe = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "a:0",
@@ -297,6 +323,9 @@ def classify_audio(path: Path) -> bool:
         # This log line is the reason the function exists: the user has to learn
         # that an extension went missing, or it happens again.
         logger.info(f"audio with no usable extension, processing anyway: {path.name}")
+        if len(_PROBED_AUDIO) >= _PROBED_AUDIO_MAX:
+            _PROBED_AUDIO.clear()
+        _PROBED_AUDIO.add(key)
         return True
     return False
 
@@ -1364,7 +1393,8 @@ def scan_inbox(cfg: Config, *, reporter: SetupReporter | None = None, wait: bool
                     logger.warning(f"{f.name!r}: cannot read its speaker count records: {e}")
                     held = {}
                 _forget_said(cfg, count_name)
-                if given is None and held.get("speakers") is not None:
+                if (given is None and held.get("speakers") is not None
+                        and filename_speaker_hint(f.stem, cfg.language)[0] is None):
                     # Given between the gate and the claim: still in time.
                     given = held["speakers"]
                     logger.info(f"{f.name}: speaker count {given}, given by the user")

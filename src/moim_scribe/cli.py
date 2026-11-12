@@ -20,6 +20,7 @@ import importlib
 import importlib.resources
 import logging
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -415,6 +416,7 @@ def _scan_with_wait(cfg: Config, args) -> dict:
     announced: set[str] = set()
     tracker = WaitTracker(cfg, rescan_sec=WAIT_RESCAN_SEC)
     while True:
+        tracker.before_pass(_clock())
         counts = scan_inbox(cfg, wait=not args.no_wait, clock=_clock)
         total["processed"] += counts["processed"]
         total["failed"] += counts["failed"]
@@ -429,7 +431,8 @@ def _scan_with_wait(cfg: Config, args) -> dict:
         if not counts.get("waiting"):
             return total
         _announce_waiting(cfg, args, announced)
-        tracker.after_pass(_clock())
+        if tracker.after_pass(_clock()):
+            continue  # a count arrived or a wait ran out during the pass
         while True:
             _sleep(WAIT_POLL_SEC)
             if tracker.due(_clock()):
@@ -457,18 +460,30 @@ def cmd_scan_inbox(args) -> int:
     return 1 if problems or counts["failed"] else 0
 
 
+_ARCHIVE_COPY = re.compile(r" \(\d+\)$")
+
+
 def _started_on(cfg: Config, query: str) -> bool:
-    """Whether `query` names a file that processing has taken out of inbox/."""
+    """Whether `query` is the name of a file that processing has taken out of
+    inbox/ (in _processing/ or _done/), with or without its extension.
+
+    Only a whole name: a part of one would match any older recording of a
+    group that saves every session under a similar name.
+    """
     q = unicodedata.normalize("NFC", query.replace("\\", "/").rsplit("/", 1)[-1]).strip().casefold()
     if not q:
         return False
     for folder in (cfg.processing_dir, cfg.done_dir):
         try:
-            names = [p.name for p in folder.iterdir()]
+            files = [p for p in folder.iterdir()]
         except OSError:
             continue
-        if any(q in unicodedata.normalize("NFC", n).casefold() for n in names):
-            return True
+        for p in files:
+            stem = unicodedata.normalize("NFC", p.stem).casefold()
+            # _done/ keeps a second recording of the same name as "name (2)".
+            if q in (unicodedata.normalize("NFC", p.name).casefold(), stem,
+                     _ARCHIVE_COPY.sub("", stem)):
+                return True
     return False
 
 

@@ -43,10 +43,13 @@ def ws(tmp_path, monkeypatch, real_count_wait):
 
     def fake_process(cfg_, claimed, progress=None, **kw):
         calls.append((claimed.name, kw))
+        if cfg._on_process:
+            cfg._on_process(claimed)
         return claimed
 
     monkeypatch.setattr(pipeline, "process_recording", fake_process)
     cfg._calls = calls
+    cfg._on_process = None        # callable(claimed): what happens while it is processed
     return cfg
 
 
@@ -86,7 +89,7 @@ def _run_watch(monkeypatch, cfg, *, on_wait=None, passes=3, interval=60.0):
 
     Returns (pass times, the timeouts it waited with)."""
     w = _import_watch(monkeypatch)
-    clock = Clock()
+    clock = cfg._clock = Clock()
     timeouts = []
 
     class FakeEvent:
@@ -172,3 +175,48 @@ def test_f7_watch_returns_to_the_interval_once_nothing_waits(ws, monkeypatch):
     assert run.timeouts[:3] == [headcount.WAIT_POLL_SEC] * 3
     assert run.timeouts[3:] == [60.0, 60.0]
     assert run.passes[1] - T0 < 10                  # noticed the removal at once
+
+
+# --- G1: what happens while a pass is busy with another recording -------------
+
+def _long_pass(cfg, then=None, seconds=200):
+    """Processing "b 3p.m4a" takes `seconds`; `then(clock)` runs 50 s in."""
+    def on_process(claimed):
+        if claimed.name == "b 3p.m4a":
+            cfg._clock.t += 50
+            if then:
+                then(cfg._clock)
+            cfg._clock.t += seconds - 50
+            cfg._pass_end = cfg._clock.t
+    cfg._on_process = on_process
+
+
+def test_g1_watch_a_count_given_during_a_long_pass_starts_right_after_it(ws, monkeypatch):
+    a = _audio(ws.inbox_dir / "a.m4a")
+    _audio(ws.inbox_dir / "b 3p.m4a")
+    _long_pass(ws, then=lambda clock: headcount.record_count(ws, a, 4, now=clock.t))
+    run = _run_watch(monkeypatch, ws, passes=3)
+    assert [c[0] for c in ws._calls] == ["b 3p.m4a", "a.m4a"]
+    assert ws._calls[1][1].get("given_speakers") == 4
+    assert run.processed_at[1] - ws._pass_end < headcount.WAIT_POLL_SEC   # not 60 s later
+
+
+def test_g1_watch_a_wait_that_ran_out_during_a_long_pass_starts_right_after_it(ws, monkeypatch):
+    _audio(ws.inbox_dir / "a.m4a")
+    _audio(ws.inbox_dir / "b 3p.m4a")
+    _long_pass(ws, seconds=200)                       # a's 180 s run out meanwhile
+    run = _run_watch(monkeypatch, ws, passes=3)
+    assert [c[0] for c in ws._calls] == ["b 3p.m4a", "a.m4a"]
+    assert run.passes[1] - ws._pass_end < headcount.WAIT_POLL_SEC
+
+
+def test_g1_an_expired_unclaimable_recording_does_not_make_watch_pass_in_a_loop(ws, monkeypatch):
+    _audio(ws.inbox_dir / "stuck.m4a")
+    headcount.mark_seen(ws, "stuck.m4a", T0 - 1000)
+    _audio(ws.inbox_dir / "other.m4a")                 # keeps watch in its waiting mode
+    monkeypatch.setattr(pipeline.shutil, "move",
+                        lambda s, d: (_ for _ in ()).throw(OSError("busy")))
+    run = _run_watch(monkeypatch, ws, passes=4, interval=60.0)
+    gaps = [b - a for a, b in zip(run.passes, run.passes[1:])]
+    assert all(g >= headcount.WAIT_POLL_SEC for g in gaps)   # never back to back
+

@@ -71,6 +71,7 @@ def watch(cfg: Config, interval_sec: float = FALLBACK_INTERVAL_SEC) -> None:
     try:
         while True:
             waiting = False
+            tracker.before_pass(time.time())
             try:
                 result = scan_inbox(cfg, reporter=reporter)
                 waiting = isinstance(result, dict) and bool(result.get("waiting"))
@@ -88,7 +89,8 @@ def watch(cfg: Config, interval_sec: float = FALLBACK_INTERVAL_SEC) -> None:
             if not waiting:
                 wake.wait(timeout=interval_sec)
                 continue
-            tracker.after_pass(time.time())
+            if tracker.after_pass(time.time()):
+                continue  # a count arrived or a wait ran out during the pass
             while not wake.wait(timeout=WAIT_POLL_SEC):
                 if tracker.due(time.time()):
                     break

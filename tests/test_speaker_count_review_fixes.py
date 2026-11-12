@@ -343,6 +343,8 @@ def test_f15_scan_inbox_does_not_pass_every_poll_for_an_unclaimable_recording(
 
     def counting(*a, **k):
         passes.append(cws.time.t)
+        if len(passes) > 200:                 # fail, rather than hang, on a pass loop
+            raise AssertionError(f"{len(passes)} passes without time passing")
         return real_scan(*a, **k)
 
     monkeypatch.setattr(pipeline, "scan_inbox", counting)
@@ -533,11 +535,16 @@ def test_f14_a_path_outside_inbox_is_refused(cws, capsys, tmp_path):
 
 def test_f14_the_already_started_hint_only_for_a_file_that_left_inbox(cws, capsys):
     cfg = cws.cfg()
-    _audio(cfg.done_dir / "260101_meeting.m4a")
-    assert cli.main(["count", "3", "meeting"]) == 1
-    assert "already started" in capsys.readouterr().err
-    assert cli.main(["count", "3", "nothing like it"]) == 1
-    assert "already started" not in capsys.readouterr().err
+    _audio(cfg.done_dir / "meeting.m4a")
+    _audio(cfg.done_dir / "standup (2).m4a")
+    _audio(cfg.done_dir / "weekly book club.m4a")
+    for q in ("meeting", "meeting.m4a", "MEETING", "standup"):
+        assert cli.main(["count", "3", q]) == 1
+        assert "already started" in capsys.readouterr().err, q
+    # A part of an older name is not that recording (G7).
+    for q in ("nothing like it", "book club", "meet"):
+        assert cli.main(["count", "3", q]) == 1
+        assert "already started" not in capsys.readouterr().err, q
 
 
 # --- F16 and F18: what scan-inbox says when it stops ----------------------------
@@ -614,7 +621,8 @@ def test_f17_control_characters_are_escaped_in_waiting(cws, capsys):
 
 
 def test_f17_display_name():
-    assert headcount.display_name("a\tb\nc\rd\x01e f") == "a\\tb\\nc\\rd\\x01e\\u2028f"
+    assert headcount.display_name("a\tb\nc\rd\x01e\u2028f\u202eg") == (
+        "a\\tb\\nc\\rd\\x01e\\u2028f\\u202eg")
     assert headcount.display_name("회의 녹음.m4a") == "회의 녹음.m4a"
 
 
@@ -664,3 +672,169 @@ def test_net_a_claim_that_keeps_failing_ends_scan_inbox(cws, capsys, monkeypatch
     assert cws.calls == []
     assert cws.time.t - T0 < 190
     assert (cfg.inbox_dir / "meeting.m4a").exists()
+
+
+# --- G1 (tracker and scan-inbox): changes during a pass --------------------------
+
+def test_g1_after_pass_says_pass_again_for_a_count_given_during_the_pass(ws):
+    a = _audio(ws.inbox_dir / "a.m4a")
+    _seen(ws, "a.m4a", T0)
+    tracker = headcount.WaitTracker(ws, rescan_sec=60)
+    tracker.before_pass(T0 + 1)
+    headcount.record_count(ws, a, 4)                  # during the pass
+    assert tracker.after_pass(T0 + 100) is True
+    # The next pass could not claim it: no further immediate pass.
+    tracker.before_pass(T0 + 100)
+    assert tracker.after_pass(T0 + 101) is False
+
+
+def test_g1_after_pass_says_pass_again_for_a_wait_that_ran_out_during_the_pass(ws):
+    _audio(ws.inbox_dir / "a.m4a")
+    _seen(ws, "a.m4a", T0)
+    tracker = headcount.WaitTracker(ws, rescan_sec=60)
+    tracker.before_pass(T0 + 1)
+    assert tracker.after_pass(T0 + 200) is True
+    tracker.before_pass(T0 + 200)                     # expired already when it began
+    assert tracker.after_pass(T0 + 201) is False
+
+
+def test_g1_after_pass_is_quiet_when_nothing_changed(ws):
+    _audio(ws.inbox_dir / "a.m4a")
+    _seen(ws, "a.m4a", T0)
+    tracker = headcount.WaitTracker(ws, rescan_sec=60)
+    tracker.before_pass(T0 + 1)
+    assert tracker.after_pass(T0 + 5) is False
+
+
+def test_g1_scan_inbox_starts_a_recording_whose_count_came_during_a_long_pass(cws, monkeypatch):
+    cfg = cws.cfg()
+    a = _audio(cfg.inbox_dir / "a.m4a")
+    _audio(cfg.inbox_dir / "b 3p.m4a")
+    end = {}
+
+    def fake_process(cfg_, claimed, progress=None, **kw):
+        cws.calls.append((claimed.name, kw, cws.time.t))
+        if claimed.name == "b 3p.m4a":
+            cws.time.t += 50
+            headcount.record_count(cfg, a, 4)
+            cws.time.t += 150
+            end["t"] = cws.time.t
+        return claimed
+
+    monkeypatch.setattr(pipeline, "process_recording", fake_process)
+    assert cli.main(["scan-inbox"]) == 0
+    assert [(c[0], c[1].get("given_speakers")) for c in cws.calls] == [
+        ("b 3p.m4a", None), ("a.m4a", 4)]
+    assert cws.calls[1][2] == end["t"]                # at once, not after a 30 s rescan
+
+
+# --- G2: the cheap look never runs ffprobe, and says things once ---------------------
+
+def _fake_ffprobe(monkeypatch, audio_names):
+    runs = []
+
+    def run(cmd, **kw):
+        runs.append(cmd[-1])
+        out = "audio\n" if Path(cmd[-1]).name in audio_names else ""
+        return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
+
+    monkeypatch.setattr(pipeline.subprocess, "run", run)
+    return runs
+
+
+def test_g2_waiting_loop_looks_do_not_probe_and_the_log_is_said_once(ws, monkeypatch, caplog):
+    _audio(ws.inbox_dir / "voice memo")               # audio with no extension
+    _audio(ws.inbox_dir / "standup.m4a")
+    (ws.inbox_dir / "notes.txt").write_text("hello " * 100, encoding="utf-8")
+    runs = _fake_ffprobe(monkeypatch, {"voice memo"})
+    tracker = headcount.WaitTracker(ws, rescan_sec=60)
+    with caplog.at_level(logging.INFO):
+        tracker.before_pass(T0)
+        assert scan_inbox(ws, clock=Clock(T0))["waiting"] == 2
+        tracker.after_pass(T0)
+        probes_in_pass = len(runs)
+        for i in range(1, 16):                        # 30 s of polling
+            assert tracker.due(T0 + 2 * i) is False
+        scan_inbox(ws, clock=Clock(T0 + 31))          # the next pass
+    assert probes_in_pass == 2                         # voice memo and notes.txt, once each
+    assert len(runs) == probes_in_pass + 1             # the next pass probes notes.txt only
+    said = [r.getMessage() for r in caplog.records if "no usable extension" in r.getMessage()]
+    assert len(said) == 1
+
+
+def test_g2_the_cheap_look_still_lists_an_extensionless_recording_the_pass_found(ws, monkeypatch):
+    _audio(ws.inbox_dir / "voice memo")
+    _fake_ffprobe(monkeypatch, {"voice memo"})
+    scan_inbox(ws, clock=Clock(T0))
+    names = [w.name for w in headcount.waiting_recordings(ws, T0 + 1, probe=False)]
+    assert names == ["voice memo"]
+
+
+def test_g2_a_changed_file_is_probed_again(ws, monkeypatch):
+    f = _audio(ws.inbox_dir / "voice memo")
+    runs = _fake_ffprobe(monkeypatch, {"voice memo"})
+    assert pipeline.classify_audio(f) and pipeline.classify_audio(f)
+    assert len(runs) == 1
+    f.write_bytes(b"y" * 30000)
+    assert pipeline.classify_audio(f)
+    assert len(runs) == 2
+
+
+def test_g2_a_file_that_was_not_audio_is_probed_again(ws, monkeypatch):
+    """A cloud placeholder fails the probe and becomes audio later, possibly
+    with the same size and time: a "no" is never remembered."""
+    f = _audio(ws.inbox_dir / "voice memo")
+    runs = _fake_ffprobe(monkeypatch, set())
+    assert not pipeline.classify_audio(f)
+    assert not pipeline.probed_audio(f)
+    _fake_ffprobe(monkeypatch, {"voice memo"})
+    assert pipeline.classify_audio(f)
+    assert len(runs) == 1
+
+
+# --- G3: a name with a folder, in part --------------------------------------------
+
+@pytest.mark.parametrize("query", ["team/meeting", "team/meet", "TEAM/Meeting.m4a",
+                                   os.path.join("team", "meet")])
+def test_g3_a_name_in_a_subfolder_is_found_in_part(ws, query):
+    rec = _audio(ws.inbox_dir / "team" / "meeting.m4a")
+    _audio(ws.inbox_dir / "other" / "meeting.m4a")
+    assert headcount.find_recording(ws, query) == rec
+
+
+def test_g3_count_takes_what_waiting_shows_without_the_extension(cws, capsys):
+    cfg = cws.cfg()
+    _audio(cfg.inbox_dir / "team" / "meeting.m4a")
+    assert cli.main(["count", "3", "team/meeting"]) == 0
+    assert headcount.given_count(cfg, "team/meeting.m4a") == 3
+
+
+def test_g3_a_path_outside_inbox_with_no_name_match_is_still_refused(cws, capsys, tmp_path):
+    cfg = cws.cfg()
+    _audio(cfg.inbox_dir / "standup.m4a")
+    outside = _audio(tmp_path / "elsewhere" / "talk.m4a")
+    assert cli.main(["count", "3", str(outside)]) == 1
+    assert "is not a recording in" in capsys.readouterr().err
+
+
+# --- G5: a count in the file name wins, and the log says so ---------------------------
+
+def test_g5_a_user_count_is_not_passed_or_logged_when_the_file_name_has_one(ws, caplog):
+    rec = _audio(ws.inbox_dir / "standup 3p.m4a")
+    headcount.record_count(ws, rec, 5)
+    with caplog.at_level(logging.INFO):
+        scan_inbox(ws, clock=Clock())
+    assert ws._calls == [("standup 3p.m4a", {"summarize": True})]
+    assert not any("given by the user" in r.getMessage() for r in caplog.records)
+
+
+# --- G6: a relative path is tried against the current folder and the workspace --------
+
+def test_g6_a_same_path_in_the_current_folder_does_not_hide_the_workspace_one(ws, tmp_path,
+                                                                              monkeypatch):
+    rec = _audio(ws.inbox_dir / "standup.m4a")
+    other = tmp_path / "otherws"
+    _audio(other / "inbox" / "standup.m4a")
+    monkeypatch.chdir(other)
+    assert headcount.find_recording(ws, os.path.join("inbox", "standup.m4a")) == rec
+

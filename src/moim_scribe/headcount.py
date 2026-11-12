@@ -139,7 +139,8 @@ _SHOW_AS = {"\t": "\\t", "\n": "\\n", "\r": "\\r"}
 
 
 def display_name(name: str) -> str:
-    """`name` for one line of output: control and undecodable characters escaped.
+    """`name` for one line of output: control, format (such as a direction
+    override) and undecodable characters escaped.
 
     Only for printing. A recording is always found by its real name.
     """
@@ -147,7 +148,7 @@ def display_name(name: str) -> str:
     for ch in name:
         if ch in _SHOW_AS:
             out.append(_SHOW_AS[ch])
-        elif unicodedata.category(ch) in ("Cc", "Cs", "Zl", "Zp"):
+        elif unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Zl", "Zp"):
             code = ord(ch)
             out.append(f"\\x{code:02x}" if code < 0x100 else f"\\u{code:04x}")
         else:
@@ -195,7 +196,7 @@ def _write(path: Path, data: dict) -> None:
     """Replace path with data in one step. Raises OSError on failure."""
     path.parent.mkdir(parents=True, exist_ok=True)
     _ignore_itself(path.parent)
-    tmp =path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}{TMP_SUFFIX}")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}{TMP_SUFFIX}")
     try:
         text = json.dumps(data, ensure_ascii=False)
         try:
@@ -335,9 +336,16 @@ def prune(cfg: Config, present: set[str], listed_at: float, now: float | None = 
 
 # --- used by commands ------------------------------------------------------
 
-def inbox_recordings(cfg: Config) -> list[Path]:
-    """Recordings the scan would look at, in the order it looks at them."""
-    from .pipeline import _ENGINE_TEMP_NAME, classify_audio, inbox_folders
+def inbox_recordings(cfg: Config, *, probe: bool = True) -> list[Path]:
+    """Recordings the scan would look at, in the order it looks at them.
+
+    probe=False never runs ffprobe: a file with no known audio extension is
+    taken only if an earlier probe found it to be audio (it is unchanged
+    since). For the frequent cheap look of a waiting loop.
+    """
+    from .pipeline import _ENGINE_TEMP_NAME, classify_audio, inbox_folders, probed_audio
+
+    check = classify_audio if probe else probed_audio
 
     found: list[Path] = []
     for folder in inbox_folders(cfg):
@@ -347,7 +355,7 @@ def inbox_recordings(cfg: Config) -> list[Path]:
             continue
         for f in entries:
             if (f.is_file() and not f.name.startswith(".")
-                    and not _ENGINE_TEMP_NAME.fullmatch(f.name) and classify_audio(f)):
+                    and not _ENGINE_TEMP_NAME.fullmatch(f.name) and check(f)):
                 found.append(f)
     return found
 
@@ -369,16 +377,22 @@ def waits_for_count(cfg: Config, recording: Path) -> bool:
     )
 
 
-def waiting_recordings(cfg: Config, now: float | None = None) -> list[WaitingRecording]:
+def waiting_recordings(cfg: Config, now: float | None = None, *,
+                       probe: bool = True) -> list[WaitingRecording]:
     """Recordings in inbox/ that wait for a count, most recently seen last.
 
     One the scan has not reached yet (dropped in seconds ago) is listed too,
     with first_seen None and the full wait left: it will wait once reached.
+    `probe` as in inbox_recordings.
     """
+    return _waiting(cfg, inbox_recordings(cfg, probe=probe), now)
+
+
+def _waiting(cfg: Config, recs: list[Path], now: float | None) -> list[WaitingRecording]:
     now = time.time() if now is None else now
     wait = float(cfg.speaker_count_wait_sec)
     out: list[WaitingRecording] = []
-    for f in inbox_recordings(cfg):
+    for f in recs:
         if not waits_for_count(cfg, f):
             continue
         name = recording_name(cfg, f)
@@ -412,19 +426,38 @@ def counted_recordings(cfg: Config) -> list[tuple[str, int]]:
 WAIT_POLL_SEC = 2.0
 
 
+class _Look:
+    """One cheap look at inbox/: every recording, and those that wait."""
+
+    def __init__(self, cfg: Config, now: float):
+        recs = inbox_recordings(cfg, probe=False)
+        waiting = _waiting(cfg, recs, now)
+        self.present = frozenset(recording_name(cfg, f) for f in recs)
+        self.names = frozenset(w.name for w in waiting)
+        self.expired = frozenset(w.name for w in waiting if w.seconds_left <= 0)
+
+
 class WaitTracker:
     """Decides when the next inbox pass is due while recordings wait for a count.
 
-    `watch` and `scan-inbox` both use it, so that they react alike. After each
-    pass, call after_pass(); then call due() every WAIT_POLL_SEC or so. A pass
-    is due when:
+    `watch` and `scan-inbox` both use it, so that they react alike:
+
+        before_pass(now); <inbox pass>; again = after_pass(now)
+        if not again: call due() every WAIT_POLL_SEC until it is True
+
+    after_pass() is True when something happened during the pass that the
+    pass could not act on, so the next pass should run at once: a recording
+    that waited when the pass began got its count, or its wait ran out, while
+    the pass was busy (with another recording, for minutes). due() is True
+    when, since the last pass:
       - the set of waiting recordings changed (a count arrived, a recording
         was added or removed),
-      - a recording's wait ran out since the last pass (only a newly expired
-        one: one that expired earlier and could not be claimed does not
-        trigger a pass on every poll),
-      - `rescan_sec` passed since the last pass (a file that was still being
-        copied may have settled), or the clock went back.
+      - a recording's wait ran out (only a newly expired one: one that expired
+        earlier and could not be claimed does not trigger a pass on every
+        poll),
+      - `rescan_sec` passed (a file that was still being copied may have
+        settled), or the clock went back.
+    The looks never run ffprobe (inbox_recordings probe=False).
     """
 
     def __init__(self, cfg: Config, rescan_sec: float):
@@ -433,20 +466,37 @@ class WaitTracker:
         self.names: frozenset[str] = frozenset()
         self.expired: frozenset[str] = frozenset()
         self.last_pass = 0.0
+        self._before: _Look | None = None
 
-    def _look(self, now: float) -> tuple[frozenset[str], frozenset[str]] | None:
+    def _look(self, now: float) -> _Look | None:
         try:
-            waiting = waiting_recordings(self.cfg, now)
+            return _Look(self.cfg, now)
         except Exception as e:  # noqa: BLE001 (a failed look only delays the pass)
             logger.debug(f"could not list the waiting recordings: {e}")
             return None
-        return (frozenset(w.name for w in waiting),
-                frozenset(w.name for w in waiting if w.seconds_left <= 0))
 
-    def after_pass(self, now: float) -> None:
+    def before_pass(self, now: float) -> None:
+        self._before = self._look(now)
+
+    def after_pass(self, now: float) -> bool:
+        """Take the new baseline; True if a pass should follow at once."""
         self.last_pass = now
         look = self._look(now)
-        self.names, self.expired = look if look is not None else (frozenset(), frozenset())
+        before, self._before = self._before, None
+        if look is None:
+            self.names, self.expired = frozenset(), frozenset()
+            return False
+        self.names, self.expired = look.names, look.expired
+        if before is None:
+            return False
+        # Waited when the pass began, still in inbox/, no longer waiting: its
+        # count arrived during the pass.
+        counted = (before.names - look.names) & look.present
+        # Waited when the pass began and ran out during it. One that had run
+        # out already at the start is not counted: the pass saw it expired
+        # and could not claim it, and must not be retried in a loop.
+        expired = (look.expired & before.names) - before.expired
+        return bool(counted or expired)
 
     def due(self, now: float) -> bool:
         if now < self.last_pass or now - self.last_pass >= self.rescan_sec:
@@ -454,8 +504,7 @@ class WaitTracker:
         look = self._look(now)
         if look is None:
             return False
-        names, expired = look
-        return names != self.names or bool(expired - self.expired)
+        return look.names != self.names or bool(look.expired - self.expired)
 
 
 def find_recording(cfg: Config, query: str) -> Path:
@@ -475,21 +524,33 @@ def find_recording(cfg: Config, query: str) -> Path:
     def norm(s: str) -> str:
         return unicodedata.normalize("NFC", s).casefold()
 
+    def names(f: Path) -> tuple[str, ...]:
+        rn = norm(recording_name(cfg, f))
+        no_ext = rn[: len(rn) - len(f.suffix)] if f.suffix else rn
+        return norm(f.name), norm(f.stem), rn, no_ext
+
+    path_problem: NoSuchRecording | None = None
     seps = {"/", os.sep} | ({os.altsep} if os.altsep else set())
     if any(s in query for s in seps):
-        as_name = q
         for s in seps:
-            as_name = as_name.replace(s, "/")
-        named = [f for f in recs if norm(recording_name(cfg, f)) == as_name]
+            q = q.replace(s, "/")
+        named = [f for f in recs if norm(recording_name(cfg, f)) == q]
         if len(named) == 1:
             return named[0]
-        return _recording_at(cfg, query.strip(), recs)
+        try:
+            return _recording_at(cfg, query.strip(), recs)
+        except NoSuchRecording as e:
+            # Not a path to a recording: try it as (part of) a name as shown
+            # by `waiting`, "team/meeting" for "team/meeting.m4a".
+            path_problem = e
 
-    exact = [f for f in recs if q in (norm(f.name), norm(f.stem), norm(recording_name(cfg, f)))]
+    exact = [f for f in recs if q in names(f)]
     if len(exact) == 1:
         return exact[0]
     partial = exact or [f for f in recs if q in norm(recording_name(cfg, f))]
     if not partial:
+        if path_problem is not None:
+            raise path_problem
         raise NoSuchRecording(f"no recording in {cfg.inbox_dir} matches {query!r}")
     if len(partial) > 1:
         raise AmbiguousRecording(
@@ -523,12 +584,12 @@ def _recording_at(cfg: Config, query: str, recs: list[Path]) -> Path:
     folder or to the workspace. Raises NoSuchRecording."""
     given = Path(query).expanduser()
     tries = [given] if given.is_absolute() else [Path.cwd() / given, cfg.workspace / given]
-    for p in tries:
-        if not p.is_file():
-            continue
+    existing = [p for p in tries if p.is_file()]
+    for p in existing:
         found = _listed(p, recs)
         if found is not None:
             return found
+    if existing:
         raise NoSuchRecording(
             f"{query} is not a recording in {cfg.inbox_dir}: only those wait for a count")
     raise NoSuchRecording(f"no recording in {cfg.inbox_dir} matches {query!r}")
