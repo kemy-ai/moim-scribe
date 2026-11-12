@@ -15,7 +15,7 @@
 ```mermaid
 flowchart TD
     subgraph machine["내 컴퓨터 안"]
-        A["inbox/<br>녹음 파일 도착"] --> W["인원수 대기 (최대 3분)<br>파일명이나 설정에 인원수가 있으면 건너뜀<br>알려 주면 바로 시작, 없으면 추정"]
+        A["inbox/<br>녹음 파일 도착"] --> W["인원수 대기<br>(모를 때만)<br>최대 3분<br>알리면 바로 시작"]
         W --> B["전사 + 화자분리<br>whisper (mlx / faster) + pyannote<br>(soniox: 텍스트는 Soniox + 화자 경계는 pyannote)"]
         FP[("화자 지문 DB<br>회차마다 축적")] <--> B
         B --> C["요약<br>모든 녹음에 요약 양식 하나<br>(+ 배경지식 팩, 있을 때만)"]
