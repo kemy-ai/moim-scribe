@@ -113,7 +113,7 @@ Python 3.11 이상(새 설치는 3.12와 3.14에서 돌려 봤고, CI는 3.11부
 brew install git ffmpeg
 python3 -m venv ~/moim-scribe-env
 source ~/moim-scribe-env/bin/activate
-pip install "moim-scribe[mlx] @ git+https://github.com/kemy-ai/moim-scribe"
+pip install "moim-scribe[mlx] @ git+https://github.com/kemy-ai/moim-scribe@v0.2.0"
 moim-scribe --version
 ```
 
@@ -124,7 +124,7 @@ winget install Git.Git
 winget install Gyan.FFmpeg
 py -m venv $HOME\moim-scribe-env
 & $HOME\moim-scribe-env\Scripts\Activate.ps1
-pip install "moim-scribe[cross] @ git+https://github.com/kemy-ai/moim-scribe"
+pip install "moim-scribe[cross] @ git+https://github.com/kemy-ai/moim-scribe@v0.2.0"
 moim-scribe --version
 ```
 
@@ -138,7 +138,7 @@ winget으로 설치한 뒤에는 `git`과 `ffmpeg`가 PATH에 잡히도록 Power
 sudo apt install git ffmpeg python3-venv
 python3 -m venv ~/moim-scribe-env
 source ~/moim-scribe-env/bin/activate
-pip install "moim-scribe[cross] @ git+https://github.com/kemy-ai/moim-scribe"
+pip install "moim-scribe[cross] @ git+https://github.com/kemy-ai/moim-scribe@v0.2.0"
 moim-scribe --version
 ```
 
