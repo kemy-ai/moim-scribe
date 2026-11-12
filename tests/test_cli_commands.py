@@ -190,7 +190,7 @@ def test_process_type_flag_compares_folder_names_normalized(tmp_path, monkeypatc
     ({"processed": 0, "failed": 0, "skipped": 0, "setup_problems": ["x: y"]}, 1),
 ])
 def test_scan_inbox_exit_code(ws, monkeypatch, capsys, counts, code):
-    monkeypatch.setattr("moim_scribe.pipeline.scan_inbox", lambda cfg: counts)
+    monkeypatch.setattr("moim_scribe.pipeline.scan_inbox", lambda cfg, **kw: counts)
     assert cli.main(["scan-inbox", str(ws)]) == code
     out = capsys.readouterr().out
     assert ("setup problem" in out) == ("setup_problems" in counts)
@@ -252,6 +252,8 @@ def test_enroll_refusal_kind_for_a_missing_label(tmp_path, monkeypatch):
     ["watch", "{ws}"],
     ["doctor", "{ws}"],
     ["speakers", "{ws}"],
+    ["waiting", "{ws}"],
+    ["count", "3", "--workspace", "{ws}"],
     ["process", "{src}", "--workspace", "{ws}"],
     ["enroll", "{src}", "{src}", "SPEAKER_00=A", "--workspace", "{ws}"],
     ["verify", "{src}", "{src}", "--workspace", "{ws}"],

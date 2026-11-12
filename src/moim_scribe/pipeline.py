@@ -1182,7 +1182,8 @@ def _count_gate(cfg: Config, f: Path, *, wait: bool, now: float) -> tuple[bool, 
         if created:
             logger.info(
                 f"{f.name}: no speaker count in the file name, waiting up to {limit}s "
-                "for one before estimating it"
+                "for one before estimating it (to give one, run in this workspace: "
+                "moim-scribe count <N>)"
             )
         return True, None
     logger.info(f"{f.name}: no speaker count given within {limit}s, estimating it")

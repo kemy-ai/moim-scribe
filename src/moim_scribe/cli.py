@@ -2,7 +2,10 @@
 
     moim-scribe init [workspace]        create a workspace skeleton (or repair one)
     moim-scribe watch [workspace]       watch the inbox and process recordings
-    moim-scribe scan-inbox [workspace]  one inbox pass (for cron / Task Scheduler)
+    moim-scribe scan-inbox [workspace]  one inbox pass (for cron / Task Scheduler);
+                                        waits for a speaker count unless --no-wait
+    moim-scribe count N [RECORDING]     tell a waiting recording how many people spoke
+    moim-scribe waiting [workspace]     list recordings waiting for a speaker count
     moim-scribe process AUDIO           process a single file (the original stays put)
     moim-scribe enroll AUDIO JSONL SPEAKER_00=Name ...   enroll fingerprints
     moim-scribe speakers [workspace]    list enrolled speakers
@@ -19,6 +22,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -302,12 +306,93 @@ def cmd_watch(args) -> int:
     return 0
 
 
-def cmd_scan_inbox(args) -> int:
+# How often the waiting loop looks at the inbox, and the longest it goes
+# without a full pass (a file that was still being copied becomes stable).
+WAIT_POLL_SEC = 2.0
+WAIT_RESCAN_SEC = 10.0
+
+
+def _clock() -> float:
+    return time.time()
+
+
+def _sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def _mmss(seconds: float) -> str:
+    total = max(0, int(seconds + 0.999))
+    return f"{total // 60}:{total % 60:02d}"
+
+
+def _count_command(cfg: Config, args) -> str:
+    """The command a user types to give a count, with --workspace when needed."""
+    ws = getattr(args, "workspace", None)
+    where = ""
+    if ws and Path(ws).expanduser().resolve() != Path.cwd().resolve():
+        where = f' --workspace "{cfg.workspace}"'
+    return f"moim-scribe count <N>{where}"
+
+
+def _announce_waiting(cfg: Config, args, announced: set[str]) -> None:
+    """Say, once per recording, that it waits and how to give the count."""
+    from .headcount import waiting_recordings
+
+    fresh = [w for w in waiting_recordings(cfg, _clock()) if w.name not in announced]
+    if not fresh:
+        return
+    for w in fresh:
+        announced.add(w.name)
+        _err(f"waiting for the speaker count: {w.name} ({_mmss(w.seconds_left)} left)")
+    _err(f"  give it from another terminal, or tell Claude: {_count_command(cfg, args)}")
+    _err("  with no answer it is processed with an estimated count; "
+         "Ctrl-C stops waiting and leaves the recordings in inbox/")
+
+
+def _scan_with_wait(cfg: Config, args) -> dict:
+    """Scan the inbox; stay while recordings wait for a count, and process each
+    as soon as its count arrives or its wait runs out.
+
+    Returns the summed counts. processed and failed add up over passes; skipped
+    is what the last pass skipped (a recording skipped on every pass counts
+    once). Setup problems end the loop at once.
+    """
+    from .headcount import waiting_recordings
     from .pipeline import scan_inbox
 
+    total = {"processed": 0, "failed": 0, "skipped": 0}
+    announced: set[str] = set()
+    while True:
+        counts = scan_inbox(cfg, wait=not args.no_wait, clock=_clock)
+        total["processed"] += counts["processed"]
+        total["failed"] += counts["failed"]
+        total["skipped"] = counts["skipped"]
+        if counts.get("setup_problems"):
+            total["setup_problems"] = counts["setup_problems"]
+            return total
+        if not counts.get("waiting"):
+            return total
+        _announce_waiting(cfg, args, announced)
+        last_pass = _clock()
+        names = {w.name for w in waiting_recordings(cfg, last_pass)}
+        while True:
+            _sleep(WAIT_POLL_SEC)
+            now = _clock()
+            current = waiting_recordings(cfg, now)
+            if (not current or {w.name for w in current} != names
+                    or any(w.seconds_left <= 0 for w in current)
+                    or now - last_pass >= WAIT_RESCAN_SEC or now < last_pass):
+                break
+
+
+def cmd_scan_inbox(args) -> int:
     cfg = _cfg(args.workspace)
     ensure_workspace_dirs(cfg)
-    counts = scan_inbox(cfg)
+    try:
+        counts = _scan_with_wait(cfg, args)
+    except KeyboardInterrupt:
+        _err("stopped: recordings that were waiting or being processed are back in inbox/")
+        return 130
     problems = counts.get("setup_problems") or []
     summary = {k: counts[k] for k in ("processed", "failed", "skipped")}
     if problems:
@@ -318,6 +403,75 @@ def cmd_scan_inbox(args) -> int:
     # Non-zero so that cron / Task Scheduler / a wrapper script notices.
     # "another run is active" is not a failure: that run does the work.
     return 1 if problems or counts["failed"] else 0
+
+
+def cmd_count(args) -> int:
+    from . import headcount
+
+    cfg = _cfg(args.workspace)
+    lo, hi = headcount.COUNT_RANGE
+    try:
+        n = int(str(args.speakers).strip())
+    except ValueError:
+        n = None
+    if n is None or not lo <= n <= hi:
+        _err(f"the speaker count must be a whole number from {lo} to {hi}, got {args.speakers!r}")
+        return 1
+    try:
+        if args.recording:
+            rec = headcount.find_recording(cfg, args.recording)
+        else:
+            latest = headcount.latest_waiting(cfg)
+            if latest is None:
+                _err("no recording is waiting for a speaker count; name the recording: "
+                     f"moim-scribe count {n} <part of its name>")
+                return 1
+            rec = latest.path
+        done = headcount.record_count(cfg, rec, n)
+    except headcount.AmbiguousRecording as e:
+        _err(f"more than one recording matches {args.recording!r}, name one of these more fully:")
+        for path in e.candidates:
+            _err(f"  {headcount.recording_name(cfg, path)}")
+        return 1
+    except headcount.NoSuchRecording as e:
+        _err(str(e))
+        _err("a recording that processing has already started on has left inbox/, "
+             "and a count can no longer change it")
+        return 1
+    except headcount.HeadcountError as e:
+        _err(str(e))
+        return 1
+    except OSError as e:
+        _err(f"could not record the count: {e}")
+        return 1
+    print(f"recorded {done.speakers} speakers for {done.name}")
+    if done.filename_count is not None:
+        print(f"note: the file name already says {done.filename_count} speakers and wins, "
+              "so this count will not be used")
+    else:
+        print("it is processed on the next inbox pass")
+    return 0
+
+
+def cmd_waiting(args) -> int:
+    """One line per recording waiting for a count: NAME, a tab, then M:SS left.
+
+    Prints nothing on stdout when none is waiting, and exits 0 either way, so
+    a script can test the output for emptiness. Notes for people go to stderr.
+    """
+    from .headcount import waiting_recordings
+
+    cfg = _cfg(args.workspace)
+    waiting = waiting_recordings(cfg)
+    for w in waiting:
+        print(f"{w.name}\t{_mmss(w.seconds_left)} left")
+    if not waiting:
+        if cfg.speaker_count_wait_sec <= 0 or cfg.default_speakers:
+            _err("no recordings are waiting: the speaker count wait is off in config.yaml "
+                 "(speaker_count_wait_sec / default_speakers)")
+        else:
+            _err("no recordings are waiting for a speaker count")
+    return 0
 
 
 def _inside(path: Path, folder: Path) -> bool:
@@ -709,9 +863,28 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--interval", type=float, default=60.0, help="fallback scan interval seconds")
     p.set_defaults(func=cmd_watch)
 
-    p = sub.add_parser("scan-inbox", help="one inbox pass (cron friendly)")
+    p = sub.add_parser("scan-inbox",
+                       help="one inbox pass; waits for a speaker count when a recording has none")
     p.add_argument("workspace", nargs="?", default=".")
+    p.add_argument("--no-wait", action="store_true",
+                   help="do not wait for a speaker count: process at once, estimating it "
+                        "(cron / Task Scheduler jobs should use this, or set "
+                        "speaker_count_wait_sec: 0 in config.yaml)")
     p.set_defaults(func=cmd_scan_inbox)
+
+    p = sub.add_parser("count", help="give the speaker count of a recording waiting in inbox/")
+    p.add_argument("speakers", metavar="N", help="how many people speak (1 to 30)")
+    p.add_argument("recording", nargs="?", default=None,
+                   help="part of the recording's file name (default: the one that has "
+                        "waited for the shortest time)")
+    p.add_argument("--workspace", default=".")
+    p.set_defaults(func=cmd_count)
+
+    p = sub.add_parser("waiting",
+                       help="list recordings waiting for a speaker count (NAME, tab, M:SS left); "
+                            "prints nothing and exits 0 when none")
+    p.add_argument("workspace", nargs="?", default=".")
+    p.set_defaults(func=cmd_waiting)
 
     p = sub.add_parser("process", help="process one audio file (outside inbox/)")
     p.add_argument("audio")
