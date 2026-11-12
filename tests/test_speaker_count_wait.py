@@ -58,8 +58,9 @@ def _audio(path: Path) -> Path:
 
 
 def _records(cfg):
+    """The record files, without the folder's own .gitignore."""
     d = headcount.headcount_dir(cfg)
-    return sorted(p.name for p in d.iterdir()) if d.is_dir() else []
+    return sorted(p.name for p in d.iterdir() if p.name != ".gitignore") if d.is_dir() else []
 
 
 # --- the gate ----------------------------------------------------------------
@@ -225,7 +226,9 @@ def test_record_file_names_do_not_grow_with_the_recording_name(ws):
     except OSError:
         pytest.skip("this filesystem does not take the name itself")
     headcount.record_count(cfg, rec, 2, now=T0)
-    assert all(len(n.encode()) < 64 for n in _records(cfg))
+    names = _records(cfg)
+    assert len(names) == 1
+    assert all(len(n.encode()) < 64 for n in names)
 
 
 def test_records_of_a_removed_recording_are_cleaned_up(ws):
@@ -374,6 +377,7 @@ def test_scan_and_count_writers_in_threads_lose_nothing(ws):
     assert errors == []
     # Once written, a count is always readable: never torn, never lost.
     first = next((i for i, r in enumerate(reads) if r is not None), len(reads))
+    assert first < len(reads)            # the check below saw at least one written count
     assert all(r is not None for r in reads[first:])
     assert headcount.given_count(cfg, name) is not None
     assert headcount.first_seen(cfg, name) == T0
@@ -405,6 +409,7 @@ def test_two_processes_writing_counts_never_tear_the_record(ws):
         headcount.mark_seen(cfg, "standup.m4a", T0)         # the scan's own writes meanwhile
     assert [p.wait() for p in procs] == [0, 0]
     first = next((i for i, r in enumerate(reads) if r is not None), len(reads))
+    assert first < len(reads)            # the check below saw at least one written count
     assert all(r is not None for r in reads[first:])
     assert 1 <= headcount.given_count(cfg, "standup.m4a") <= 30
     assert headcount.first_seen(cfg, "standup.m4a") == T0
@@ -412,7 +417,7 @@ def test_two_processes_writing_counts_never_tear_the_record(ws):
 
 # --- the functions the commands use ------------------------------------------
 
-def test_waiting_list_and_latest(ws):
+def test_waiting_list(ws):
     cfg = ws
     _audio(cfg.inbox_dir / "older.m4a")
     scan_inbox(cfg, clock=Clock(T0))
@@ -421,9 +426,8 @@ def test_waiting_list_and_latest(ws):
     _audio(cfg.inbox_dir / "with 3p.m4a")                    # has a count: not waiting
     waiting = headcount.waiting_recordings(cfg, now=T0 + 90)
     assert [(w.name, w.seconds_left) for w in waiting] == [("older.m4a", 90.0), ("newer.m4a", 150.0)]
-    assert headcount.latest_waiting(cfg, now=T0 + 90).name == "newer.m4a"
     _audio(cfg.inbox_dir / "just dropped.m4a")              # not scanned yet
-    latest = headcount.latest_waiting(cfg, now=T0 + 90)
+    latest = headcount.waiting_recordings(cfg, now=T0 + 90)[-1]
     assert latest.name == "just dropped.m4a" and latest.first_seen is None
     assert latest.seconds_left == 180.0
 

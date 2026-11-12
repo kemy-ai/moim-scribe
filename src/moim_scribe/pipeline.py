@@ -58,9 +58,18 @@ PROMPT_HEADERS = {
         "rec_line": "녹음 일시: {dt}  ※ 정리의 '일시'에 이 값을 쓸 것(전사에 별도 날짜 언급이 없으면)",
         "spk_stats": "=== 화자 통계 (diarize 실측 — 참석 인원·발화 비율은 이 데이터 기준) ===",
         "spk_fixed": "※ 파일명 지정 참석 인원: {n}명 (이 값이 확정값)",
-        "spk_user": "※ 사용자가 알려준 참석 인원: {n}명 (이 값이 확정값)",
-        "spk_spoken": "※ 녹음 첫머리에서 말한 참석 인원: {n}명 (자동 추정 아님)",
-        "spk_default": "※ 설정 default_speakers로 정한 참석 인원: {n}명 (자동 추정 아님)",
+        "spk_user": (
+            "※ 사용자가 알려준 참석 인원: {n}명 (이 값이 확정값. 자동 추정이 아니며, "
+            "지침에 나오는 \"파일명 지정 참석 인원\" 줄과 같은 효력)"
+        ),
+        "spk_spoken": (
+            "※ 녹음 첫머리에서 말한 참석 인원: {n}명 (자동 추정 아님. "
+            "지침에 나오는 \"파일명 지정 참석 인원\" 줄과 같은 효력)"
+        ),
+        "spk_default": (
+            "※ 설정 default_speakers로 정한 참석 인원: {n}명 (자동 추정 아님. "
+            "지침에 나오는 \"파일명 지정 참석 인원\" 줄과 같은 효력)"
+        ),
         "transcript": "=== 전사본 ===",
     },
     "en": {
@@ -73,9 +82,18 @@ PROMPT_HEADERS = {
         "rec_line": "Recorded at: {dt}  (use this for the summary's date unless the transcript says otherwise)",
         "spk_stats": "=== Speaker stats (measured — use these for attendee count and talk shares) ===",
         "spk_fixed": "Note: attendee count fixed by filename: {n} (authoritative)",
-        "spk_user": "Note: attendee count given by the user: {n} (authoritative)",
-        "spk_spoken": "Note: attendee count spoken at the start of the recording: {n} (not estimated)",
-        "spk_default": "Note: attendee count set by default_speakers: {n} (not estimated)",
+        "spk_user": (
+            "Note: attendee count given by the user: {n} (authoritative, not estimated; "
+            "treat it like an \"attendee count fixed by filename\" note)"
+        ),
+        "spk_spoken": (
+            "Note: attendee count spoken at the start of the recording: {n} (not estimated; "
+            "treat it like an \"attendee count fixed by filename\" note)"
+        ),
+        "spk_default": (
+            "Note: attendee count set by default_speakers: {n} (not estimated; "
+            "treat it like an \"attendee count fixed by filename\" note)"
+        ),
         "transcript": "=== Transcript ===",
     },
 }
@@ -688,6 +706,11 @@ def process_recording(
     progress = progress if progress is not None else RunProgress()
     hint, title = filename_speaker_hint(claimed.stem, cfg.language)
     hint_source = "filename" if hint else None
+    if given_speakers is not None and _headcount._valid_count(given_speakers) is None:
+        lo, hi = _headcount.COUNT_RANGE
+        logger.warning(f"{claimed.name}: ignoring the given speaker count {given_speakers!r}, "
+                       f"it is not a whole number from {lo} to {hi}")
+        given_speakers = None
     if hint is None and given_speakers:
         hint, hint_source = given_speakers, "user"
     # The user's local date, timezone-explicit — result filenames must match
@@ -1146,6 +1169,29 @@ def _archive_done(cfg: Config, claimed: Path, stem: str, work_products: list[Pat
     )
 
 
+# Log lines the gate has already written, so a recording that cannot be
+# claimed does not repeat them on every pass. Keyed by workspace, recording
+# and what was said; a recording's keys go once it is claimed.
+_GATE_SAID: set[tuple[str, str, str]] = set()
+_GATE_SAID_MAX = 10_000
+
+
+def _say_once(cfg: Config, name: str, what: str, message: str) -> None:
+    key = (str(cfg.workspace), name, what)
+    if key in _GATE_SAID:
+        return
+    if len(_GATE_SAID) >= _GATE_SAID_MAX:
+        _GATE_SAID.clear()
+    _GATE_SAID.add(key)
+    logger.info(message)
+
+
+def _forget_said(cfg: Config, name: str) -> None:
+    ws = str(cfg.workspace)
+    for key in [k for k in _GATE_SAID if k[0] == ws and k[1] == name]:
+        _GATE_SAID.discard(key)
+
+
 def _count_gate(cfg: Config, f: Path, *, wait: bool, now: float) -> tuple[bool, int | None]:
     """Whether `f` waits for its speaker count this pass, and the count the user gave.
 
@@ -1164,9 +1210,13 @@ def _count_gate(cfg: Config, f: Path, *, wait: bool, now: float) -> tuple[bool, 
     name = _headcount.recording_name(cfg, f)
     given = _headcount.given_count(cfg, name)
     if given is not None:
-        logger.info(f"{f.name}: speaker count {given}, given by the user")
+        _say_once(cfg, name, f"user {given}", f"{f.name}: speaker count {given}, given by the user")
         return False, given
     if not wait or cfg.default_speakers or cfg.speaker_count_wait_sec <= 0:
+        return False, None
+    if not _headcount.nameable(name):
+        _say_once(cfg, name, "unnameable", f"{f.name!r}: the file name has bytes that are not "
+                  "UTF-8, so a count cannot be given for it: processing it now")
         return False, None
     try:
         seen, created = _headcount.mark_seen(cfg, name, now)
@@ -1186,7 +1236,8 @@ def _count_gate(cfg: Config, f: Path, *, wait: bool, now: float) -> tuple[bool, 
                 "moim-scribe count <N>)"
             )
         return True, None
-    logger.info(f"{f.name}: no speaker count given within {limit}s, estimating it")
+    _say_once(cfg, name, f"estimate {seen}",
+              f"{f.name}: no speaker count given within {limit}s, estimating it")
     return False, None
 
 
@@ -1201,8 +1252,17 @@ def _prune_headcount(cfg: Config, now: float) -> None:
         except OSError:
             # Cannot tell what is there: deleting now could drop a live record.
             return
-        present.update(_headcount.record_key(_headcount.recording_name(cfg, f)) for f in entries)
-    _headcount.prune(cfg, present, listed_at=now)
+        for f in entries:
+            try:
+                present.add(_headcount.record_key(_headcount.recording_name(cfg, f)))
+            except Exception as e:  # noqa: BLE001
+                # No record can exist under a name that has no key, so
+                # leaving it out deletes nothing it owns.
+                logger.debug(f"no record key for {f!r}: {e}")
+    try:
+        _headcount.prune(cfg, present, listed_at=now)
+    except Exception as e:  # noqa: BLE001 (tidying must never stop the pass)
+        logger.warning(f"could not tidy the speaker count records: {type(e).__name__}: {e}")
 
 
 def scan_inbox(cfg: Config, *, reporter: SetupReporter | None = None, wait: bool = True,
@@ -1211,7 +1271,8 @@ def scan_inbox(cfg: Config, *, reporter: SetupReporter | None = None, wait: bool
 
     Returns {"processed": n, "failed": n, "skipped": n}, plus "waiting": n
     when n recordings were left in place to wait for their speaker count
-    (absent when none, like "setup_problems"). The wait never blocks: a
+    (absent when none, like "setup_problems"), and "busy": True when another
+    run holds the lock and this pass did nothing. The wait never blocks: a
     waiting recording is skipped and looked at again next pass. `wait=False`
     processes such recordings now, with an estimated count unless one was
     given. `clock` returns the current time in seconds (time.time). When the pass stopped
@@ -1234,7 +1295,7 @@ def scan_inbox(cfg: Config, *, reporter: SetupReporter | None = None, wait: bool
             reporter.report([problem])
             return {**counts, "setup_problems": [problem]}
         logger.info("another run is active: yielding this pass")
-        return counts
+        return {**counts, "busy": True}
     try:
         # Before anything is claimed or moved, quarantine included: a setup
         # problem must leave every recording exactly where the user put it.
@@ -1268,7 +1329,14 @@ def scan_inbox(cfg: Config, *, reporter: SetupReporter | None = None, wait: bool
                 if not is_stable_audio(f):
                     counts["skipped"] += 1
                     continue
-                holds, given = _count_gate(cfg, f, wait=wait, now=clock())
+                try:
+                    holds, given = _count_gate(cfg, f, wait=wait, now=clock())
+                except Exception as e:  # noqa: BLE001
+                    # One recording's records must not stop the pass: go on as
+                    # 0.2.0 did, processing it now with an estimated count.
+                    logger.warning(f"{f.name!r}: cannot check its speaker count wait "
+                                   f"({type(e).__name__}: {e}), processing it now")
+                    holds, given = False, None
                 if holds:
                     counts["waiting"] = counts.get("waiting", 0) + 1
                     continue
@@ -1290,7 +1358,16 @@ def scan_inbox(cfg: Config, *, reporter: SetupReporter | None = None, wait: bool
                 # Claimed: its records go, so a later recording of the same
                 # name does not inherit them. Put back below if the claim is undone.
                 count_name = _headcount.recording_name(cfg, f)
-                held = _headcount.take(cfg, count_name)
+                try:
+                    held = _headcount.take(cfg, count_name)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"{f.name!r}: cannot read its speaker count records: {e}")
+                    held = {}
+                _forget_said(cfg, count_name)
+                if given is None and held.get("speakers") is not None:
+                    # Given between the gate and the claim: still in time.
+                    given = held["speakers"]
+                    logger.info(f"{f.name}: speaker count {given}, given by the user")
 
                 stem = claimed.stem
                 if not name_fits(cfg.processing_dir, stem):

@@ -109,7 +109,50 @@ def recording_name(cfg: Config, recording: Path) -> str:
 
 
 def record_key(name: str) -> str:
-    return hashlib.sha256(unicodedata.normalize("NFC", name).encode("utf-8")).hexdigest()[:32]
+    """The record file stem for a recording name. Never raises.
+
+    A name the file system could not decode (Linux: a CP949 name from a
+    Windows zip arrives as lone surrogates) cannot be encoded as strict UTF-8;
+    "surrogatepass" keeps every such name distinct instead of failing.
+    """
+    return hashlib.sha256(
+        unicodedata.normalize("NFC", name).encode("utf-8", "surrogatepass")
+    ).hexdigest()[:32]
+
+
+def nameable(name: str) -> bool:
+    """False for a name with bytes the file system could not decode.
+
+    Such a recording is not held back for a count: nobody can type its name,
+    so it is processed at once, as 0.2.0 did.
+    """
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+# Shown in place of a character that would break a one-line, tab-separated
+# listing or that the console cannot print (an undecodable byte).
+_SHOW_AS = {"\t": "\\t", "\n": "\\n", "\r": "\\r"}
+
+
+def display_name(name: str) -> str:
+    """`name` for one line of output: control and undecodable characters escaped.
+
+    Only for printing. A recording is always found by its real name.
+    """
+    out = []
+    for ch in name:
+        if ch in _SHOW_AS:
+            out.append(_SHOW_AS[ch])
+        elif unicodedata.category(ch) in ("Cc", "Cs", "Zl", "Zp"):
+            code = ord(ch)
+            out.append(f"\\x{code:02x}" if code < 0x100 else f"\\u{code:04x}")
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 # --- low-level file access -------------------------------------------------
@@ -133,12 +176,34 @@ def _read(path: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _ignore_itself(folder: Path) -> None:
+    """Keep the records out of git: they hold recording titles in plain text.
+
+    A workspace made by 0.2.0 has no `.moim-scribe-headcount/` line in its
+    .gitignore, so the folder carries its own. Best effort.
+    """
+    marker = folder / ".gitignore"
+    if marker.exists():
+        return
+    try:
+        marker.write_text("*\n", encoding="utf-8")
+    except OSError as e:
+        logger.debug(f"could not write {marker}: {e}")
+
+
 def _write(path: Path, data: dict) -> None:
     """Replace path with data in one step. Raises OSError on failure."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}{TMP_SUFFIX}")
+    _ignore_itself(path.parent)
+    tmp =path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}{TMP_SUFFIX}")
     try:
-        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        text = json.dumps(data, ensure_ascii=False)
+        try:
+            body = text.encode("utf-8")
+        except UnicodeEncodeError:
+            # A name with undecodable bytes: keep them as JSON escapes.
+            body = json.dumps(data).encode("ascii")
+        tmp.write_bytes(body)
         for attempt in range(_RETRY_ATTEMPTS):
             try:
                 os.replace(tmp, path)
@@ -299,6 +364,7 @@ def waits_for_count(cfg: Config, recording: Path) -> bool:
         cfg.speaker_count_wait_sec > 0
         and not cfg.default_speakers
         and _filename_count(cfg, recording) is None
+        and nameable(recording_name(cfg, recording))
         and given_count(cfg, recording_name(cfg, recording)) is None
     )
 
@@ -328,18 +394,78 @@ def waiting_recordings(cfg: Config, now: float | None = None) -> list[WaitingRec
     return out
 
 
-def latest_waiting(cfg: Config, now: float | None = None) -> WaitingRecording | None:
-    """The waiting recording that arrived last ("the one I just put in")."""
-    waiting = waiting_recordings(cfg, now)
-    return waiting[-1] if waiting else None
+def counted_recordings(cfg: Config) -> list[tuple[str, int]]:
+    """(name, count) of each recording in inbox/ that has a count from the user
+    and has not been started on yet."""
+    out = []
+    for f in inbox_recordings(cfg):
+        name = recording_name(cfg, f)
+        n = given_count(cfg, name)
+        if n is not None:
+            out.append((name, n))
+    return out
+
+
+# How often a waiting loop takes the cheap look (waiting_recordings) between
+# inbox passes. A full pass reads every recording and waits for it to settle,
+# so it runs only when this look finds a reason (see WaitTracker).
+WAIT_POLL_SEC = 2.0
+
+
+class WaitTracker:
+    """Decides when the next inbox pass is due while recordings wait for a count.
+
+    `watch` and `scan-inbox` both use it, so that they react alike. After each
+    pass, call after_pass(); then call due() every WAIT_POLL_SEC or so. A pass
+    is due when:
+      - the set of waiting recordings changed (a count arrived, a recording
+        was added or removed),
+      - a recording's wait ran out since the last pass (only a newly expired
+        one: one that expired earlier and could not be claimed does not
+        trigger a pass on every poll),
+      - `rescan_sec` passed since the last pass (a file that was still being
+        copied may have settled), or the clock went back.
+    """
+
+    def __init__(self, cfg: Config, rescan_sec: float):
+        self.cfg = cfg
+        self.rescan_sec = rescan_sec
+        self.names: frozenset[str] = frozenset()
+        self.expired: frozenset[str] = frozenset()
+        self.last_pass = 0.0
+
+    def _look(self, now: float) -> tuple[frozenset[str], frozenset[str]] | None:
+        try:
+            waiting = waiting_recordings(self.cfg, now)
+        except Exception as e:  # noqa: BLE001 (a failed look only delays the pass)
+            logger.debug(f"could not list the waiting recordings: {e}")
+            return None
+        return (frozenset(w.name for w in waiting),
+                frozenset(w.name for w in waiting if w.seconds_left <= 0))
+
+    def after_pass(self, now: float) -> None:
+        self.last_pass = now
+        look = self._look(now)
+        self.names, self.expired = look if look is not None else (frozenset(), frozenset())
+
+    def due(self, now: float) -> bool:
+        if now < self.last_pass or now - self.last_pass >= self.rescan_sec:
+            return True
+        look = self._look(now)
+        if look is None:
+            return False
+        names, expired = look
+        return names != self.names or bool(expired - self.expired)
 
 
 def find_recording(cfg: Config, query: str) -> Path:
     """The one recording in inbox/ whose name contains `query`.
 
     Matching ignores case and Unicode normalization. An exact name (with or
-    without extension) wins over partial matches. Raises NoSuchRecording or
-    AmbiguousRecording.
+    without extension) wins over partial matches. A query with a path
+    separator may also be a path to the recording (relative to the current
+    folder or to the workspace, or absolute); a path outside inbox/ is
+    refused. Raises NoSuchRecording or AmbiguousRecording.
     """
     q = unicodedata.normalize("NFC", query).strip().casefold()
     if not q:
@@ -348,6 +474,16 @@ def find_recording(cfg: Config, query: str) -> Path:
 
     def norm(s: str) -> str:
         return unicodedata.normalize("NFC", s).casefold()
+
+    seps = {"/", os.sep} | ({os.altsep} if os.altsep else set())
+    if any(s in query for s in seps):
+        as_name = q
+        for s in seps:
+            as_name = as_name.replace(s, "/")
+        named = [f for f in recs if norm(recording_name(cfg, f)) == as_name]
+        if len(named) == 1:
+            return named[0]
+        return _recording_at(cfg, query.strip(), recs)
 
     exact = [f for f in recs if q in (norm(f.name), norm(f.stem), norm(recording_name(cfg, f)))]
     if len(exact) == 1:
@@ -362,6 +498,40 @@ def find_recording(cfg: Config, query: str) -> Path:
             partial,
         )
     return partial[0]
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _listed(recording: Path, recs: list[Path]) -> Path | None:
+    """The entry of `recs` that is the file `recording`, as the scan lists it.
+
+    On a case-insensitive file system "STANDUP.M4A" opens "standup.m4a", but
+    the scan keys its records by the listed name.
+    """
+    if recording in recs:
+        return recording
+    return next((f for f in recs if _same_file(f, recording)), None)
+
+
+def _recording_at(cfg: Config, query: str, recs: list[Path]) -> Path:
+    """The recording a path names: absolute, or relative to the current
+    folder or to the workspace. Raises NoSuchRecording."""
+    given = Path(query).expanduser()
+    tries = [given] if given.is_absolute() else [Path.cwd() / given, cfg.workspace / given]
+    for p in tries:
+        if not p.is_file():
+            continue
+        found = _listed(p, recs)
+        if found is not None:
+            return found
+        raise NoSuchRecording(
+            f"{query} is not a recording in {cfg.inbox_dir}: only those wait for a count")
+    raise NoSuchRecording(f"no recording in {cfg.inbox_dir} matches {query!r}")
 
 
 def record_count(cfg: Config, recording: Path, speakers: int,
@@ -379,6 +549,8 @@ def record_count(cfg: Config, recording: Path, speakers: int,
     recording = Path(recording)
     if not recording.is_file():
         raise NoSuchRecording(f"{recording} is not in {cfg.inbox_dir} (already processed?)")
+    # Record under the name the scan will look it up by.
+    recording = _listed(recording, inbox_recordings(cfg)) or recording
     try:
         recording.relative_to(cfg.inbox_dir)
     except ValueError:

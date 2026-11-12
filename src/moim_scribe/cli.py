@@ -23,6 +23,7 @@ import shutil
 import sys
 import tempfile
 import time
+import unicodedata
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -306,10 +307,10 @@ def cmd_watch(args) -> int:
     return 0
 
 
-# How often the waiting loop looks at the inbox, and the longest it goes
-# without a full pass (a file that was still being copied becomes stable).
-WAIT_POLL_SEC = 2.0
-WAIT_RESCAN_SEC = 10.0
+# The longest the waiting loop goes without a full inbox pass (a file that was
+# still being copied may have settled). Between passes it only takes the cheap
+# look of headcount.WaitTracker every headcount.WAIT_POLL_SEC.
+WAIT_RESCAN_SEC = 30.0
 
 
 def _clock() -> float:
@@ -325,25 +326,37 @@ def _mmss(seconds: float) -> str:
     return f"{total // 60}:{total % 60:02d}"
 
 
+def _workspace_option(cfg: Config, args) -> str:
+    """' --workspace "<path>"' when the workspace is not the current folder, else ""."""
+    ws = getattr(args, "workspace", None)
+    if ws and Path(ws).expanduser().resolve() != Path.cwd().resolve():
+        return f' --workspace "{cfg.workspace}"'
+    return ""
+
+
 def _count_command(cfg: Config, args) -> str:
     """The command a user types to give a count, with --workspace when needed."""
-    ws = getattr(args, "workspace", None)
-    where = ""
-    if ws and Path(ws).expanduser().resolve() != Path.cwd().resolve():
-        where = f' --workspace "{cfg.workspace}"'
-    return f"moim-scribe count <N>{where}"
+    return f"moim-scribe count <N>{_workspace_option(cfg, args)}"
+
+
+def _time_left(w) -> str:
+    """How long a waiting recording still waits, for a listing."""
+    return "not scanned yet" if w.first_seen is None else f"{_mmss(w.seconds_left)} left"
 
 
 def _announce_waiting(cfg: Config, args, announced: set[str]) -> None:
     """Say, once per recording, that it waits and how to give the count."""
-    from .headcount import waiting_recordings
+    from .headcount import display_name, waiting_recordings
 
-    fresh = [w for w in waiting_recordings(cfg, _clock()) if w.name not in announced]
+    # Only what the scan holds back: a file it has not reached (still being
+    # copied, or too small to be a recording) is not waiting yet.
+    fresh = [w for w in waiting_recordings(cfg, _clock())
+             if w.first_seen is not None and w.name not in announced]
     if not fresh:
         return
     for w in fresh:
         announced.add(w.name)
-        _err(f"waiting for the speaker count: {w.name} ({_mmss(w.seconds_left)} left)")
+        _err(f"waiting for the speaker count: {display_name(w.name)} ({_mmss(w.seconds_left)} left)")
     _err(f"  give it from another terminal, or tell Claude: {_count_command(cfg, args)}")
     _err("  with no answer it is processed with an estimated count; "
          "Ctrl-C stops waiting and leaves the recordings in inbox/")
@@ -355,13 +368,15 @@ def _scan_with_wait(cfg: Config, args) -> dict:
 
     Returns the summed counts. processed and failed add up over passes; skipped
     is what the last pass skipped (a recording skipped on every pass counts
-    once). Setup problems end the loop at once.
+    once). Setup problems end the loop at once. When to pass again is decided
+    by headcount.WaitTracker, the same rule `watch` follows.
     """
-    from .headcount import waiting_recordings
+    from .headcount import WAIT_POLL_SEC, WaitTracker
     from .pipeline import scan_inbox
 
     total = {"processed": 0, "failed": 0, "skipped": 0}
     announced: set[str] = set()
+    tracker = WaitTracker(cfg, rescan_sec=WAIT_RESCAN_SEC)
     while True:
         counts = scan_inbox(cfg, wait=not args.no_wait, clock=_clock)
         total["processed"] += counts["processed"]
@@ -370,18 +385,17 @@ def _scan_with_wait(cfg: Config, args) -> dict:
         if counts.get("setup_problems"):
             total["setup_problems"] = counts["setup_problems"]
             return total
+        if counts.get("busy"):
+            _err("another moim-scribe run (watch?) is processing inbox/: this scan-inbox stops "
+                 "here and leaves the recordings to it")
+            return total
         if not counts.get("waiting"):
             return total
         _announce_waiting(cfg, args, announced)
-        last_pass = _clock()
-        names = {w.name for w in waiting_recordings(cfg, last_pass)}
+        tracker.after_pass(_clock())
         while True:
             _sleep(WAIT_POLL_SEC)
-            now = _clock()
-            current = waiting_recordings(cfg, now)
-            if (not current or {w.name for w in current} != names
-                    or any(w.seconds_left <= 0 for w in current)
-                    or now - last_pass >= WAIT_RESCAN_SEC or now < last_pass):
+            if tracker.due(_clock()):
                 break
 
 
@@ -391,7 +405,8 @@ def cmd_scan_inbox(args) -> int:
     try:
         counts = _scan_with_wait(cfg, args)
     except KeyboardInterrupt:
-        _err("stopped: recordings that were waiting or being processed are back in inbox/")
+        _err("stopped: unless a message above says otherwise, recordings that were waiting "
+             "or being processed are back in inbox/")
         return 130
     problems = counts.get("setup_problems") or []
     summary = {k: counts[k] for k in ("processed", "failed", "skipped")}
@@ -405,66 +420,127 @@ def cmd_scan_inbox(args) -> int:
     return 1 if problems or counts["failed"] else 0
 
 
+def _started_on(cfg: Config, query: str) -> bool:
+    """Whether `query` names a file that processing has taken out of inbox/."""
+    q = unicodedata.normalize("NFC", query.replace("\\", "/").rsplit("/", 1)[-1]).strip().casefold()
+    if not q:
+        return False
+    for folder in (cfg.processing_dir, cfg.done_dir):
+        try:
+            names = [p.name for p in folder.iterdir()]
+        except OSError:
+            continue
+        if any(q in unicodedata.normalize("NFC", n).casefold() for n in names):
+            return True
+    return False
+
+
+def _not_found(cfg: Config, message: str, query: str) -> int:
+    _err(message)
+    if _started_on(cfg, query):
+        _err("a recording that processing has already started on has left inbox/, "
+             "and a count can no longer change it")
+    return 1
+
+
+def _count_target(cfg: Config, args, n: int):
+    """The recording a count without a name is for, or None (already reported).
+
+    Only when exactly one recording waits for its count. With more, a count
+    could land on the wrong one, so nothing is recorded and they are listed.
+    """
+    from . import headcount
+
+    candidates = headcount.waiting_recordings(cfg, _clock())
+    where = _workspace_option(cfg, args)
+    if not candidates:
+        _err("no recording is waiting for a speaker count; to give or change the count of a "
+             f"recording in inbox/, name it: moim-scribe count {n} <part of its name>{where}")
+        return None
+    if len(candidates) > 1:
+        _err(f"{len(candidates)} recordings are waiting for a speaker count, so a count "
+             "without a name was not recorded. Name the one it is for:")
+        for w in candidates:
+            _err(f"  {headcount.display_name(w.name)}\t{_time_left(w)}")
+        _err(f"  moim-scribe count {n} <part of its name>{where}")
+        return None
+    return candidates[0].path
+
+
+def _parse_count(text: str) -> int | None:
+    text = str(text).strip()
+    if not text or not all("0" <= c <= "9" for c in text):
+        return None
+    return int(text)
+
+
 def cmd_count(args) -> int:
     from . import headcount
 
     cfg = _cfg(args.workspace)
     lo, hi = headcount.COUNT_RANGE
-    try:
-        n = int(str(args.speakers).strip())
-    except ValueError:
-        n = None
+    n = _parse_count(args.speakers)
     if n is None or not lo <= n <= hi:
         _err(f"the speaker count must be a whole number from {lo} to {hi}, got {args.speakers!r}")
         return 1
+    query = args.recording
     try:
-        if args.recording:
-            rec = headcount.find_recording(cfg, args.recording)
+        if query:
+            rec = headcount.find_recording(cfg, query)
         else:
-            latest = headcount.latest_waiting(cfg)
-            if latest is None:
-                _err("no recording is waiting for a speaker count; name the recording: "
-                     f"moim-scribe count {n} <part of its name>")
+            rec = _count_target(cfg, args, n)
+            if rec is None:
                 return 1
-            rec = latest.path
+            query = rec.name
         done = headcount.record_count(cfg, rec, n)
     except headcount.AmbiguousRecording as e:
         _err(f"more than one recording matches {args.recording!r}, name one of these more fully:")
         for path in e.candidates:
-            _err(f"  {headcount.recording_name(cfg, path)}")
+            _err(f"  {headcount.display_name(headcount.recording_name(cfg, path))}")
         return 1
     except headcount.NoSuchRecording as e:
-        _err(str(e))
-        _err("a recording that processing has already started on has left inbox/, "
-             "and a count can no longer change it")
-        return 1
+        return _not_found(cfg, str(e), query)
     except headcount.HeadcountError as e:
         _err(str(e))
         return 1
     except OSError as e:
         _err(f"could not record the count: {e}")
         return 1
-    print(f"recorded {done.speakers} speakers for {done.name}")
+    shown = headcount.display_name(done.name)
+    print(f"recorded {done.speakers} speakers for {shown}")
     if done.filename_count is not None:
         print(f"note: the file name already says {done.filename_count} speakers and wins, "
               "so this count will not be used")
     else:
         print("it is processed on the next inbox pass")
+    if not args.recording:
+        # A count meant to correct the last one lands here when the last one
+        # is no longer waiting: say which recordings already have a count.
+        for name, count in headcount.counted_recordings(cfg):
+            if name != done.name:
+                print(f"note: {headcount.display_name(name)} already has {count} speakers recorded; "
+                      f"to change that, name it: moim-scribe count <N> <part of its name>"
+                      f"{_workspace_option(cfg, args)}")
     return 0
 
 
 def cmd_waiting(args) -> int:
-    """One line per recording waiting for a count: NAME, a tab, then M:SS left.
+    """One line per recording waiting for a count: NAME, a tab, then "M:SS left",
+    or "not scanned yet" for one the inbox scan has not reached yet.
 
     Prints nothing on stdout when none is waiting, and exits 0 either way, so
     a script can test the output for emptiness. Notes for people go to stderr.
+    In NAME, a tab, a line break or another control character, and a byte the
+    file system could not decode, are shown escaped (\\t, \\n, \\x01, \\udcc8), so
+    every recording is one line with one tab. To pass a name back to `count`,
+    use a part of it without such characters.
     """
-    from .headcount import waiting_recordings
+    from .headcount import display_name, waiting_recordings
 
     cfg = _cfg(args.workspace)
     waiting = waiting_recordings(cfg)
     for w in waiting:
-        print(f"{w.name}\t{_mmss(w.seconds_left)} left")
+        print(f"{display_name(w.name)}\t{_time_left(w)}")
     if not waiting:
         if cfg.speaker_count_wait_sec <= 0 or cfg.default_speakers:
             _err("no recordings are waiting: the speaker count wait is off in config.yaml "
@@ -875,14 +951,15 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("count", help="give the speaker count of a recording waiting in inbox/")
     p.add_argument("speakers", metavar="N", help="how many people speak (1 to 30)")
     p.add_argument("recording", nargs="?", default=None,
-                   help="part of the recording's file name (default: the one that has "
-                        "waited for the shortest time)")
+                   help="part of the recording's file name, or its path; may be left out "
+                        "when exactly one recording is waiting")
     p.add_argument("--workspace", default=".")
     p.set_defaults(func=cmd_count)
 
     p = sub.add_parser("waiting",
-                       help="list recordings waiting for a speaker count (NAME, tab, M:SS left); "
-                            "prints nothing and exits 0 when none")
+                       help="list recordings waiting for a speaker count (NAME, tab, then "
+                            "'M:SS left' or 'not scanned yet'; control characters in NAME are "
+                            "escaped); prints nothing and exits 0 when none")
     p.add_argument("workspace", nargs="?", default=".")
     p.set_defaults(func=cmd_waiting)
 

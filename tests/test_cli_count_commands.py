@@ -73,15 +73,27 @@ def _seen(ws, name, when):
 
 # --- count -------------------------------------------------------------------
 
-def test_count_records_for_the_most_recent_waiting_recording(ws, capsys):
+def test_count_without_a_name_records_for_the_one_waiting_recording(ws, capsys):
+    _audio(ws, "standup.m4a")
+    _seen(ws, "standup.m4a", T0 - 10)
+    assert cli.main(["count", "4", "--workspace", str(ws)]) == 0
+    assert "recorded 4 speakers for standup.m4a" in capsys.readouterr().out
+    assert headcount.given_count(load_config(ws), "standup.m4a") == 4
+
+
+def test_count_without_a_name_and_two_waiting_records_nothing_and_lists_them(ws, capsys):
     _audio(ws, "older.m4a")
     _audio(ws, "newer.m4a")
     _seen(ws, "older.m4a", T0 - 100)
     _seen(ws, "newer.m4a", T0 - 10)
-    assert cli.main(["count", "4", "--workspace", str(ws)]) == 0
-    assert "recorded 4 speakers for newer.m4a" in capsys.readouterr().out
+    assert cli.main(["count", "4", "--workspace", str(ws)]) == 1
+    cap = capsys.readouterr()
+    assert cap.out == ""
+    assert "2 recordings are waiting" in cap.err and "not recorded" in cap.err
+    assert "  older.m4a\t1:20 left" in cap.err and "  newer.m4a\t2:50 left" in cap.err
+    assert "moim-scribe count 4 <part of its name>" in cap.err
     cfg = load_config(ws)
-    assert headcount.given_count(cfg, "newer.m4a") == 4
+    assert headcount.given_count(cfg, "newer.m4a") is None
     assert headcount.given_count(cfg, "older.m4a") is None
 
 
@@ -109,7 +121,8 @@ def test_count_with_an_unknown_name_says_so_and_fails(ws, capsys):
     _audio(ws, "club one.m4a")
     assert cli.main(["count", "4", "nothing like it", "--workspace", str(ws)]) == 1
     err = capsys.readouterr().err
-    assert "no recording" in err and "already started" in err
+    assert "no recording" in err
+    assert "already started" not in err      # nothing of that name has left inbox/
 
 
 def test_count_for_a_recording_already_processing_says_it_left_inbox(ws, capsys):
@@ -217,7 +230,7 @@ def test_waiting_when_a_default_count_is_set_is_quiet(ws, capsys):
 def test_a_recording_with_a_count_is_no_longer_listed(ws, capsys):
     _audio(ws, "standup.m4a")
     assert cli.main(["waiting", str(ws)]) == 0
-    assert capsys.readouterr().out.startswith("standup.m4a\t3:00 left")
+    assert capsys.readouterr().out.startswith("standup.m4a\tnot scanned yet")
     assert cli.main(["count", "3", "--workspace", str(ws)]) == 0
     capsys.readouterr()
     assert cli.main(["waiting", str(ws)]) == 0
