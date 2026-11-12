@@ -76,12 +76,38 @@ can name speakers automatically — is everyone OK with that?"
   model as ordinary files, not links into the Hugging Face cache, so the
   workspace keeps working offline after the cache is cleared. The gated
   pyannote models stay in the Hugging Face cache.
+- **Head counts you give are kept in a small local record.** When a recording
+  without a count in its name is waiting, the workspace holds
+  `.moim-scribe-headcount/` with up to two tiny files per recording: the
+  recording's path inside `inbox/` (which includes its file name), the time the
+  program first saw it, and the count you gave. It stays on your machine and is
+  covered by the workspace `.gitignore`. The files are deleted when the
+  recording is picked up for processing, and any left for a recording that is no
+  longer in `inbox/` are removed at the next pass over the inbox.
 - **Deletion is simple.** Delete `<workspace>/speakers/<name>.npy` and the
   person's entry in `speakers/index.json` to forget a voice; delete the
   workspace to forget everything.
 - **Third-party telemetry is off.** pyannote.audio 4.x sends anonymous usage
   metrics by default; moim-scribe disables this (`PYANNOTE_METRICS_ENABLED`)
   unless you explicitly export it as `true` to support their project stats.
+
+## Where Claude Code can see your files
+
+Two things in 0.2.1 are new and are not part of the pipeline's own data flow.
+
+- **Opening Claude Code in the workspace folder.** The workspace holds
+  recordings, transcripts, summaries and fingerprints. If you open Claude Code
+  there (for example to tell Claude a head count), Claude can read those files,
+  and whatever it reads is sent to Anthropic as part of that conversation.
+  `moim-scribe init` writes a `CLAUDE.md` that tells Claude not to open them
+  unless you ask. That is an instruction to the model, not a lock: nothing
+  prevents a file from being read. If that is not acceptable, do not open
+  Claude Code in the workspace; give counts with `moim-scribe count`. The
+  `claude_cli` summarizer is unaffected: it runs from an empty temporary
+  folder, not from the workspace.
+- **Slack notifications.** moim-scribe has no Slack connection. If you attach
+  one by the guide in [notify-slack.md](notify-slack.md), the message carries the
+  waiting recording's file name to Slack and to everyone who reads that channel.
 
 ## What you must never publish
 

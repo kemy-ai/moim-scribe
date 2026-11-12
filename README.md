@@ -2,7 +2,7 @@
 
 **A local-first voice pipeline built for recurring meetings — the more often the same people meet, the more accurate it gets.**
 
-By default the summary step sends the transcript to Anthropic through Claude Code. Set `summarizer: ollama` or `summarizer: none` and everything stays on your machine.
+By default the summary step sends the transcript to Anthropic through Claude Code. Set `summarizer: ollama` or `summarizer: none` and the pipeline sends nothing off your machine (opening Claude Code in the workspace folder is a separate matter: see "Privacy and consent").
 
 *moim* (모임) is Korean for a small recurring gathering — a book club, a writing circle, a weekly team sync. moim-scribe watches a folder, and when a recording lands in it: transcribes (whisper) → separates speakers (pyannote) → **matches voices against a fingerprint database that grows with every session** → writes a summary. It does not ask what kind of recording it is: a meeting, a call and a book club all go into the same folder and come out in the same format. Voice fingerprints are always local. Two steps are yours to choose: transcription runs on your machine by default and can instead go to Soniox, and summarization can be local (Ollama, or none) or a cloud LLM (Claude).
 
@@ -25,7 +25,7 @@ flowchart TD
     C -.->|"the transcript and a few facts, and only with a<br>cloud backend (claude_cli · anthropic_api)"| LLM["cloud LLM"]
 ```
 
-Fingerprints never cross the dashed line. Two things can, each only if you choose it: the audio (`stt_backend: soniox`) and the transcript (a cloud summarizer). What the summarizer receives is the transcript, the recording's title and time, the speaker statistics, and your pack background when a pack matches; never the audio and never a fingerprint. With the defaults changed to `soniox` + `none`, the recording leaves and the transcript does not; with `mlx` + `ollama`, nothing leaves at all.
+The pipeline never sends fingerprints across the dashed line. Two things can, each only if you choose it: the audio (`stt_backend: soniox`) and the transcript (a cloud summarizer). What the summarizer receives is the transcript, the recording's title and time, the speaker statistics, and your pack background when a pack matches; never the audio and never a fingerprint. With the defaults changed to `soniox` + `none`, the recording leaves and the transcript does not; with `mlx` + `ollama`, the pipeline sends nothing out.
 
 ## What is in the box
 
@@ -46,8 +46,9 @@ Fingerprints never cross the dashed line. Two things can, each only if you choos
 | Group tags | a log line when a voice match comes from a different group | "Teaching it who is who" below |
 | Label verification | cross-check a finished transcript against fingerprints | [docs/speaker-verification.md](docs/speaker-verification.md) |
 | Background service | launchd / systemd / Task Scheduler templates | [docs/deployment.md](docs/deployment.md) |
+| Slack notice | a message when a recording is waiting for its speaker count (you build it; no connection is built in) | [docs/notify-slack.md](docs/notify-slack.md) |
 
-**Not included.** Publishing to Notion or other tools, chat notifications (Slack and the like), and phone-to-computer intake are deliberately left out. A cloud-synced folder (iCloud Drive, Google Drive, Dropbox) works as the inbox with no integration at all, and anything else can be built around `results/`, which is plain files.
+**Not included.** Publishing to Notion or other tools, a built-in chat connection, and phone-to-computer intake are deliberately left out (an optional guide shows how to attach Slack yourself). A cloud-synced folder (iCloud Drive, Google Drive, Dropbox) works as the inbox with no integration at all, and anything else can be built around `results/`, which is plain files.
 
 ## What to expect
 
@@ -62,7 +63,7 @@ Measured before the 0.2 release on real Korean recordings of the same three peop
 
 What that means in practice:
 
-- **Put the number of people in the file name.** Without it the count is estimated, and estimation often splits one person into several labels. The run says so in a warning, and the summary then reports "N speaker labels (estimated)" instead of an attendee count.
+- **Give the number of people**, in the file name or within 3 minutes of dropping the recording in ("Telling it how many people were there" below). Without it the count is estimated, and estimation often splits one person into several labels. The run says so in a warning, and the summary then reports "N speaker labels (estimated)" instead of an attendee count.
 - **A name is attached only when the match is confident.** The tool would rather leave `SPEAKER_NN` than guess: across these runs a wrong name landed on under 2% of the speech. Expect unnamed stretches, especially with similar voices, and check the transcript before trusting who said what.
 - **Recordings differ.** The same three people gave 98.7% on one day and about half on another. Voices that sound alike get merged or split by the diarization model itself; fingerprints cannot repair that after the fact, and enrolling from more than one recording helps the matching, not the splitting.
 - **Speed.** On an Apple Silicon Mac the 67-minute recording took 17 minutes (peak memory 1.1 GB). On a laptop CPU without a GPU, expect about 1.5 to 2.5 times the length of the recording.
@@ -93,11 +94,11 @@ pyannote and speechbrain are PyTorch and run everywhere (CUDA, MPS, CPU). The wa
 
 | backend | where it runs | speaker separation | notes |
 |---|---|---|---|
-| `mlx` (default on Apple Silicon) | your machine | pyannote, locally | takes a speaker count from the filename or a spoken cue |
+| `mlx` (default on Apple Silicon) | your machine | pyannote, locally | takes a speaker count from the filename, from you, or from a spoken cue |
 | `faster` (default elsewhere) | your machine | pyannote, locally | same |
 | `soniox` | Soniox's servers — **the audio is uploaded** | Soniox, or pyannote locally if you have a token | no model download required. Needs an API key and is billed per hour of audio |
 
-`soniox` is fast and accurate **when people take turns speaking**; on a noisy recording where several people talked over each other, testing found it fusing distinct speakers into one. If a Hugging Face token is present, moim-scribe fixes that by keeping Soniox's text and re-deriving the speaker boundaries with pyannote locally — on by default, skipped silently without a token, and the only way a speaker count in the filename does anything on this path. Soniox alone accepts no count: diarization is a single on/off switch that detects up to 15 speakers by itself. A single file is capped at 300 minutes.
+`soniox` is fast and accurate **when people take turns speaking**; on a noisy recording where several people talked over each other, testing found it fusing distinct speakers into one. If a Hugging Face token is present, moim-scribe fixes that by keeping Soniox's text and re-deriving the speaker boundaries with pyannote locally — on by default, skipped silently without a token, and the only way a speaker count (from the filename, or one you give) does anything on this path. Soniox alone accepts no count: diarization is a single on/off switch that detects up to 15 speakers by itself. A single file is capped at 300 minutes.
 
 Setup and the quota you have to manage: [docs/setup-soniox.md](docs/setup-soniox.md).
 
@@ -113,7 +114,7 @@ You need Python 3.11 or newer (clean installs were run on 3.12 and 3.14; CI runs
 brew install git ffmpeg
 python3 -m venv ~/moim-scribe-env
 source ~/moim-scribe-env/bin/activate
-pip install "moim-scribe[mlx] @ git+https://github.com/kemy-ai/moim-scribe@v0.2.0"
+pip install "moim-scribe[mlx] @ git+https://github.com/kemy-ai/moim-scribe@v0.2.1"
 moim-scribe --version
 ```
 
@@ -124,7 +125,7 @@ winget install Git.Git
 winget install Gyan.FFmpeg
 py -m venv $HOME\moim-scribe-env
 & $HOME\moim-scribe-env\Scripts\Activate.ps1
-pip install "moim-scribe[cross] @ git+https://github.com/kemy-ai/moim-scribe@v0.2.0"
+pip install "moim-scribe[cross] @ git+https://github.com/kemy-ai/moim-scribe@v0.2.1"
 moim-scribe --version
 ```
 
@@ -138,7 +139,7 @@ If activation fails with "running scripts is disabled on this system", Windows i
 sudo apt install git ffmpeg python3-venv
 python3 -m venv ~/moim-scribe-env
 source ~/moim-scribe-env/bin/activate
-pip install "moim-scribe[cross] @ git+https://github.com/kemy-ai/moim-scribe@v0.2.0"
+pip install "moim-scribe[cross] @ git+https://github.com/kemy-ai/moim-scribe@v0.2.1"
 moim-scribe --version
 ```
 
@@ -178,16 +179,43 @@ cp recording.m4a inbox/
 moim-scribe watch
 ```
 
-Use `moim-scribe scan-inbox` instead of `watch` for a single pass. Commands take the workspace folder as an argument, or use the current folder when you run them inside it. Every command except `init` refuses a folder that has no `config.yaml`.
+A recording without a head count in its name waits up to 3 minutes for one (next section). Use `moim-scribe scan-inbox` instead of `watch` for a single pass; it waits in place, and `--no-wait` skips the wait. Commands take the workspace folder as an argument, or use the current folder when you run them inside it. Every command except `init` refuses a folder that has no `config.yaml`.
 
 Results land in `results/` as `YYMMDD_title_summary.md` plus the full diarized transcript. Want transcripts only? Set `summarizer: none`. Tips that remove guesswork:
 
 - put the attendee count at the end of a word in the filename: `book club 5명.m4a` (language `ko`) or `standup 4p.m4a` (other languages)
 - or say it at the start of the recording ("참석자 다섯 명입니다" / "five participants today")
+- or give it after you drop the recording in (next section)
 
 The filename count is recognized only in these forms: with `language: ko`, a number of one or two digits followed by `명` or `인` (`5명`, `3인`) that is not followed by another Korean syllable; with any other language, a number followed by `p`, `ppl`, `people` or `speakers` as a whole word (`4p`, `4 people`, `4 speakers`). Only 1 to 30 counts. A date such as `1103`, a year, or a word such as `3인칭` or `인터뷰` is not read as a count, and a title that holds no count is left untouched.
 
 If setup is incomplete (no token, no ffmpeg, a missing backend package, no summarizer tool), `watch`, `scan-inbox` and `process` say what is missing and leave every recording where it is; nothing is claimed or moved until the setup is complete. `scan-inbox` exits with status 1 on a setup problem or when a recording failed.
+
+## Telling it how many people were there
+
+The number of people is the biggest help to speaker separation (see "What to expect"), so moim-scribe gives you a moment to say it before it starts.
+
+1. Put the recording in `inbox/`. If its file name already holds the count (`... 5명` / `... 5p`), or `default_speakers` in `config.yaml` is not 0, it starts at once, as before.
+2. If not, the recording stays where it is and waits up to **3 minutes**.
+3. In that time, give the count in one of two ways:
+   - Tell Claude, with Claude Code open in the workspace folder: "the one I just added had 4 people". `init` puts a `CLAUDE.md` in the workspace that tells Claude what to do.
+   - Or run `moim-scribe count 4` yourself. If several recordings wait, add part of a file name: `moim-scribe count 4 "team sync"`.
+4. Once you give it, the recording starts at the next pass over the inbox. If you do not, it starts after the 3 minutes with an estimated count, and the summary says the count is estimated. A count from the file name, from you, from the start of the recording or from `default_speakers` is written as fixed; only a guess is marked as estimated.
+
+```
+$ moim-scribe waiting
+team-sync.m4a	3:00 left
+$ moim-scribe count 4
+recorded 4 speakers for team-sync.m4a
+it is processed on the next inbox pass
+```
+
+- `moim-scribe waiting` lists what is waiting, one line each, and prints nothing when nothing waits.
+- If the file name already has a count, the file name wins over the one you give.
+- `watch` looks at the inbox every 60 seconds, so after you give a count it can take up to a minute to start. `scan-inbox` waits in place, up to 3 minutes, and says so on screen; `--no-wait` makes it process at once instead.
+- The wait is `speaker_count_wait_sec` in `config.yaml`: 180 by default, 0 for no wait (what 0.2.0 did). If you run `scan-inbox` from cron or Task Scheduler, use `--no-wait` or 0.
+- A count said aloud at the start of the recording is only known after transcription, so such a recording waits the 3 minutes too.
+- To get a Slack message when a recording waits, see [docs/notify-slack.md](docs/notify-slack.md). It is optional and nothing is connected by default.
 
 ## Teaching it who is who
 
@@ -244,7 +272,9 @@ Voice fingerprints are **biometric personal data**, and recordings capture priva
 
 - **Record and enroll only with every participant's consent.** In many jurisdictions this is a legal requirement, not a courtesy — e.g. under Korea's Personal Information Protection Act, voiceprints used to identify a person are sensitive biometric information requiring separate explicit consent.
 - Fingerprinting is always local, and after the first model download that step is forced offline. Two steps can reach the network, and only if you configure them to: `stt_backend: soniox` uploads the **audio** (and `glossary.txt` as context, if you keep one), and a cloud summarizer sends the **transcript** (with the recording title and time, speaker statistics, and your pack background when a pack matches). The defaults keep the audio home.
-- The workspace keeps fingerprints (`speakers/`), recordings, and rosters outside the repo, and `init` drops a defensive `.gitignore` in the workspace (it also covers `packs/` and `glossary.txt`). Never publish a workspace.
+- The workspace keeps fingerprints (`speakers/`), recordings, and rosters outside the repo, plus a small record of head counts you gave (`.moim-scribe-headcount/`, see [docs/privacy.md](docs/privacy.md)), and `init` drops a defensive `.gitignore` in the workspace (it also covers `packs/` and `glossary.txt`). Never publish a workspace.
+- **Opening Claude Code in the workspace is a new boundary.** If you open Claude Code in the workspace folder (for example to tell Claude a head count), Claude can read every file there: recordings, transcripts, summaries and fingerprints. What it reads is sent to Anthropic as part of that conversation. The `CLAUDE.md` that `init` writes tells Claude not to open them unless you ask, but that is an instruction, not a lock: nothing blocks it. If that is not acceptable, open Claude Code in another folder and give counts with `moim-scribe count`.
+- **A Slack notification, if you set one up, sends recording file names to Slack.** It is off unless you build it ([docs/notify-slack.md](docs/notify-slack.md)); file names are often meeting titles or people's names.
 
 Details: [docs/privacy.md](docs/privacy.md).
 
@@ -257,12 +287,17 @@ launchd (macOS), systemd (Linux), and Task Scheduler (Windows) templates: [docs/
 - **Setup problems stop before touching your recordings.** No token, no ffmpeg, a missing backend package or a missing summarizer tool: `watch` / `scan-inbox` / `process` print what is missing and leave every recording in the inbox. Fix it and the next pass picks them up. `watch` keeps running and checks again each pass.
 - **`inbox/_error/`** holds a recording that failed on its own (it could not be decoded, the filename was too long, a leftover from a run that stopped halfway). Read the log line for the reason, fix it, and move the file back into `inbox/` to retry.
 - **A failed summary does not lose the transcript.** The diarized transcript is written to `results/` before the summary is attempted, so you keep it even when the summarizer failed. Move the recording back to `inbox/` to try the summary again.
+- **A recording that sits in `inbox/` for a few minutes with no warning** may be waiting for its speaker count, not stuck: `moim-scribe waiting` lists it, and it starts by itself once the wait (3 minutes by default) is over.
 - **A file that stays in `inbox/` and logs a warning** is either still downloading or not a valid audio file. If it is not downloading, remove it from `inbox/`.
 - `scan-inbox` exits with status 1 when a recording failed or the setup is incomplete, so a scheduler can notice.
 
 ## Maintenance
 
 Best-effort: issues and PRs are read, response time is not guaranteed. Forks welcome.
+
+## Upgrading from 0.2.0
+
+A recording with no count in its file name now waits up to 3 minutes before it starts (see "Telling it how many people were there"). To get 0.2.0 behaviour back, set `speaker_count_wait_sec: 0` in `config.yaml`. Run `moim-scribe init <workspace>` again to add the `CLAUDE.md` guide file; an existing one is left alone.
 
 ## Upgrading from 0.1
 
@@ -274,7 +309,7 @@ Best-effort: issues and PRs are read, response time is not guaranteed. Forks wel
 - **Packs.** `"type"` and `"style"` in `match.json` are ignored; the title keyword alone decides.
 - **File names.** Summaries are now `YYMMDD_title_summary.md`.
 - **`moim-scribe process`** no longer needs `--type` (it is accepted and ignored). It works on a private copy and refuses a file that is inside the workspace `inbox/`.
-- **`init` is safe to run again.** It never overwrites `config.yaml`, it adds missing lens files and `.gitignore` entries, and `--force` is now a no-op. `--reset-config` writes a fresh config after saving the old one as `config.yaml.bak`; an existing backup is never overwritten (the next ones are `config.yaml.bak.2`, `config.yaml.bak.3`, ...), and the command prints the name it used. The fresh config gets the language given with `--language` (default `ko`), and the command says which one it wrote.
+- **`init` is safe to run again.** It never overwrites `config.yaml`, it adds missing lens files, the `CLAUDE.md` guide file and `.gitignore` entries, and `--force` is now a no-op. `--reset-config` writes a fresh config after saving the old one as `config.yaml.bak`; an existing backup is never overwritten (the next ones are `config.yaml.bak.2`, `config.yaml.bak.3`, ...), and the command prints the name it used. The fresh config gets the language given with `--language` (default `ko`), and the command says which one it wrote.
 - **`config.yaml` is validated when loaded.** An unknown key is reported, a wrong value is an error before anything is transcribed, `summarizer: null` means `none`, and `stt` is accepted as another spelling of `stt_backend`.
 
 ## Roadmap (not in v0.2)

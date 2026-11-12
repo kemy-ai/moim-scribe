@@ -6,6 +6,12 @@ lighter `scan-inbox` (single pass) on an interval — simpler and more robust
 than supervising a long-lived watcher, and the pipeline's claim/lock design
 makes overlapping runs harmless.
 
+The templates pass `--no-wait`. Without it, a pass waits in place, up to
+`speaker_count_wait_sec` (3 minutes by default), for the speaker count of a
+recording whose file name has none. With `--no-wait` such a recording is processed at once with an
+estimated count, as in 0.2.0. To give people time to say the count, run
+`moim-scribe watch` instead (see the README).
+
 The `moim-scribe` command exists inside the virtual environment you installed
 it into (the README install blocks create `~/moim-scribe-env`). A scheduler does
 not activate that environment, so give it the full path of the executable
@@ -31,6 +37,7 @@ the environment active, for example `/Users/USER/moim-scribe-env/bin/moim-scribe
     <string>/Users/USER/.local/bin/moim-scribe</string>
     <string>scan-inbox</string>
     <string>/Users/USER/MyMeetings</string>
+    <string>--no-wait</string>
   </array>
   <key>StartInterval</key><integer>60</integer>
   <key>RunAtLoad</key><true/>
@@ -72,7 +79,7 @@ Description=moim-scribe inbox pass
 
 [Service]
 Type=oneshot
-ExecStart=%h/.local/bin/moim-scribe scan-inbox %h/MyMeetings
+ExecStart=%h/.local/bin/moim-scribe scan-inbox %h/MyMeetings --no-wait
 ```
 
 `~/.config/systemd/user/moim-scribe.timer`:
@@ -97,7 +104,7 @@ systemctl --user enable --now moim-scribe.timer
 
 ```powershell
 $action  = New-ScheduledTaskAction -Execute "moim-scribe.exe" `
-           -Argument "scan-inbox C:\Users\USER\MyMeetings"
+           -Argument "scan-inbox C:\Users\USER\MyMeetings --no-wait"
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
            -RepetitionInterval (New-TimeSpan -Minutes 1)
 Register-ScheduledTask -TaskName "moim-scribe" -Action $action -Trigger $trigger

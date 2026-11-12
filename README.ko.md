@@ -2,7 +2,7 @@
 
 **반복해서 만나는 모임을 위한 로컬 우선 음성 파이프라인 — 같은 사람들이 자주 만날수록 더 정확해집니다.**
 
-기본 설정에서는 요약 단계가 전사본을 Claude Code를 통해 Anthropic으로 보냅니다. `summarizer: ollama` 또는 `summarizer: none`으로 바꾸면 모든 것이 내 컴퓨터 안에 머뭅니다.
+기본 설정에서는 요약 단계가 전사본을 Claude Code를 통해 Anthropic으로 보냅니다. `summarizer: ollama` 또는 `summarizer: none`으로 바꾸면 파이프라인은 아무것도 컴퓨터 밖으로 보내지 않습니다(작업 폴더에서 Claude Code를 여는 것은 별개의 문제입니다: "프라이버시와 동의" 참고).
 
 독서모임, 글쓰기 모임, 매주 하는 팀 회의처럼 **같은 멤버가 반복해서 만나는 자리**를 위해 만들었습니다. 지정 폴더를 감시하다가 녹음 파일이 들어오면: 전사(whisper) → 화자분리(pyannote) → **회차마다 쌓이는 음성 지문 DB와 대조해, 확신이 있는 구간에 실명을 붙이고** → 요약까지. 어떤 종류의 녹음인지 묻지 않습니다. 회의든 통화든 독서모임이든 같은 폴더에 넣고 같은 형식으로 받습니다. 음성 지문은 항상 로컬입니다. 직접 고르는 단계가 둘 있습니다 — 전사는 기본이 내 컴퓨터이고 Soniox로 보낼 수도 있으며, 정리는 로컬(Ollama 또는 생략) 또는 클라우드 LLM(Claude)입니다.
 
@@ -25,7 +25,7 @@ flowchart TD
     C -.->|"클라우드 백엔드 선택 시에만<br>전사본과 몇 가지 정보 전송 (claude_cli · anthropic_api)"| LLM["클라우드 LLM"]
 ```
 
-지문은 점선을 절대 넘지 않습니다. 넘을 수 있는 것은 둘이고 각각 직접 골라야만 넘습니다 — 녹음 파일(`stt_backend: soniox`)과 전사본(클라우드 정리 백엔드). 정리 백엔드가 받는 것은 전사본, 녹음 제목과 시각, 화자 통계, 그리고 팩이 매칭되면 그 배경지식이며, 녹음 파일이나 음성 지문은 절대 받지 않습니다. `soniox` + `none` 조합이면 녹음은 나가고 전사본은 안 나가며, `mlx` + `ollama`면 아무것도 안 나갑니다.
+파이프라인은 지문을 점선 밖으로 절대 보내지 않습니다. 넘을 수 있는 것은 둘이고 각각 직접 골라야만 넘습니다 — 녹음 파일(`stt_backend: soniox`)과 전사본(클라우드 정리 백엔드). 정리 백엔드가 받는 것은 전사본, 녹음 제목과 시각, 화자 통계, 그리고 팩이 매칭되면 그 배경지식이며, 녹음 파일이나 음성 지문은 절대 받지 않습니다. `soniox` + `none` 조합이면 녹음은 나가고 전사본은 안 나가며, `mlx` + `ollama`면 파이프라인이 내보내는 것은 없습니다.
 
 ## 기능 구분
 
@@ -46,8 +46,9 @@ flowchart TD
 | 소속 태그 | 지문 매칭이 다른 모임 사람에게서 나왔을 때 로그 한 줄 | 아래 "누가 누군지 가르치기" |
 | 라벨 검증 | 완성된 전사를 지문과 교차 확인 | [docs/speaker-verification.md](docs/speaker-verification.md) |
 | 백그라운드 상주 | launchd / systemd / 작업 스케줄러 템플릿 | [docs/deployment.md](docs/deployment.md) |
+| Slack 알림 | 녹음이 인원수를 기다릴 때 메시지 한 통 (직접 만들어 붙이는 것이며 기본 연결은 없음) | [docs/notify-slack.ko.md](docs/notify-slack.ko.md) |
 
-**포함하지 않는 것.** 노션 등 외부 도구로의 발행, 메신저 알림(슬랙 등), 휴대폰에서 컴퓨터로 가져오는 접수 기능은 넣지 않았습니다. 클라우드 동기화 폴더(iCloud Drive, Google Drive, Dropbox)는 별도 연동 없이 그대로 inbox로 쓸 수 있고, 그 밖의 것은 일반 파일인 `results/` 위에 붙이면 됩니다.
+**포함하지 않는 것.** 노션 등 외부 도구로의 발행, 내장 메신저 연결, 휴대폰에서 컴퓨터로 가져오는 접수 기능은 넣지 않았습니다(Slack은 직접 붙이는 방법을 선택 안내로 실어 두었습니다). 클라우드 동기화 폴더(iCloud Drive, Google Drive, Dropbox)는 별도 연동 없이 그대로 inbox로 쓸 수 있고, 그 밖의 것은 일반 파일인 `results/` 위에 붙이면 됩니다.
 
 ## 기대할 수 있는 것
 
@@ -62,7 +63,7 @@ flowchart TD
 
 실제로 뜻하는 바:
 
-- **파일명에 인원수를 적으세요.** 없으면 인원수를 추정하는데, 추정은 한 사람을 여러 라벨로 쪼개는 일이 흔합니다. 그때는 실행 중에 경고가 나오고, 요약도 참석 인원 대신 "화자 라벨 N개(자동 추정)"라고 적습니다.
+- **인원수를 알려 주세요.** 파일명에 적거나, 녹음을 넣고 3분 안에 알려 주면 됩니다(아래 "인원수 알려 주기"). 없으면 인원수를 추정하는데, 추정은 한 사람을 여러 라벨로 쪼개는 일이 흔합니다. 그때는 실행 중에 경고가 나오고, 요약도 참석 인원 대신 "화자 라벨 N개(자동 추정)"라고 적습니다.
 - **이름은 확신이 있을 때만 붙습니다.** 추측하느니 `SPEAKER_NN`으로 남깁니다. 위 실행들에서 틀린 이름이 붙은 발화는 2% 미만이었습니다. 목소리가 비슷하면 이름 없는 구간이 꽤 남으니, 누가 한 말인지는 전사본을 확인한 뒤에 믿으세요.
 - **녹음마다 다릅니다.** 같은 세 사람이 어느 날은 98.7%, 다른 날은 절반쯤이었습니다. 비슷한 목소리를 합치거나 쪼개는 것은 화자분리 모델 자체의 동작이라 지문으로 사후에 고칠 수 없습니다. 여러 녹음에서 등록하면 이름 대조는 좋아지지만 쪼개짐은 그대로입니다.
 - **속도.** Apple Silicon 맥에서 67분 녹음에 17분이 걸렸습니다(최대 메모리 1.1 GB). GPU 없는 노트북 CPU에서는 녹음 길이의 1.5배에서 2.5배쯤을 예상하세요.
@@ -93,11 +94,11 @@ pyannote·speechbrain은 PyTorch라 어디서든 돌고(CUDA·MPS·CPU), 폴더 
 
 | 백엔드 | 어디서 도나 | 화자분리 | 특징 |
 |---|---|---|---|
-| `mlx` (Apple Silicon 기본) | 내 컴퓨터 | pyannote, 로컬 | 파일명이나 녹음 앞부분 멘트에서 인원수를 받습니다 |
+| `mlx` (Apple Silicon 기본) | 내 컴퓨터 | pyannote, 로컬 | 파일명, 내가 알려 준 값, 녹음 앞부분 멘트에서 인원수를 받습니다 |
 | `faster` (그 외 기본) | 내 컴퓨터 | pyannote, 로컬 | 동일 |
 | `soniox` | Soniox 서버 — **녹음이 업로드됩니다** | Soniox, 또는 토큰이 있으면 로컬 pyannote | 모델 다운로드 불필요. API 키 필요, 오디오 시간당 과금 |
 
-`soniox`는 **한 명씩 순서대로 말하는 대화**에서 빠르고 정확한데, 여러 사람이 서로 말을 겹쳐 하는 시끄러운 녹음에서는 서로 다른 화자를 하나로 뭉치는 것이 실측으로 확인됐습니다. 허깅페이스 토큰이 있으면 moim-scribe가 그 약점을 보완합니다 — Soniox의 텍스트는 그대로 두고 **화자 경계만 로컬 pyannote로 다시 뽑습니다**. 기본으로 켜져 있고, 토큰이 없으면 조용히 건너뛰며, 파일명에 적은 인원수가 이 경로에서 쓰이는 유일한 방법이기도 합니다. Soniox 자체는 인원수를 받지 않습니다(화자분리가 켜고 끄는 스위치 하나이고 최대 15명까지 스스로 감지). 파일 하나당 300분 상한이 있습니다.
+`soniox`는 **한 명씩 순서대로 말하는 대화**에서 빠르고 정확한데, 여러 사람이 서로 말을 겹쳐 하는 시끄러운 녹음에서는 서로 다른 화자를 하나로 뭉치는 것이 실측으로 확인됐습니다. 허깅페이스 토큰이 있으면 moim-scribe가 그 약점을 보완합니다 — Soniox의 텍스트는 그대로 두고 **화자 경계만 로컬 pyannote로 다시 뽑습니다**. 기본으로 켜져 있고, 토큰이 없으면 조용히 건너뛰며, 파일명에 적은 인원수(또는 내가 알려 준 인원수)가 이 경로에서 쓰이는 유일한 방법이기도 합니다. Soniox 자체는 인원수를 받지 않습니다(화자분리가 켜고 끄는 스위치 하나이고 최대 15명까지 스스로 감지). 파일 하나당 300분 상한이 있습니다.
 
 설정 방법과 직접 관리해야 하는 용량 상한: [docs/setup-soniox.md](docs/setup-soniox.md)
 
@@ -113,7 +114,7 @@ Python 3.11 이상(새 설치는 3.12와 3.14에서 돌려 봤고, CI는 3.11부
 brew install git ffmpeg
 python3 -m venv ~/moim-scribe-env
 source ~/moim-scribe-env/bin/activate
-pip install "moim-scribe[mlx] @ git+https://github.com/kemy-ai/moim-scribe@v0.2.0"
+pip install "moim-scribe[mlx] @ git+https://github.com/kemy-ai/moim-scribe@v0.2.1"
 moim-scribe --version
 ```
 
@@ -124,7 +125,7 @@ winget install Git.Git
 winget install Gyan.FFmpeg
 py -m venv $HOME\moim-scribe-env
 & $HOME\moim-scribe-env\Scripts\Activate.ps1
-pip install "moim-scribe[cross] @ git+https://github.com/kemy-ai/moim-scribe@v0.2.0"
+pip install "moim-scribe[cross] @ git+https://github.com/kemy-ai/moim-scribe@v0.2.1"
 moim-scribe --version
 ```
 
@@ -138,7 +139,7 @@ winget으로 설치한 뒤에는 `git`과 `ffmpeg`가 PATH에 잡히도록 Power
 sudo apt install git ffmpeg python3-venv
 python3 -m venv ~/moim-scribe-env
 source ~/moim-scribe-env/bin/activate
-pip install "moim-scribe[cross] @ git+https://github.com/kemy-ai/moim-scribe@v0.2.0"
+pip install "moim-scribe[cross] @ git+https://github.com/kemy-ai/moim-scribe@v0.2.1"
 moim-scribe --version
 ```
 
@@ -178,16 +179,43 @@ cp 녹음.m4a inbox/
 moim-scribe watch
 ```
 
-1회만 돌리려면 `watch` 대신 `moim-scribe scan-inbox`를 쓰세요. 명령은 워크스페이스 폴더를 인자로 받거나, 그 폴더 안에서 실행하면 현재 폴더를 씁니다. `init`을 제외한 모든 명령은 `config.yaml`이 없는 폴더를 거부합니다.
+파일명에 인원수가 없는 녹음은 최대 3분 기다립니다(다음 절). 1회만 돌리려면 `watch` 대신 `moim-scribe scan-inbox`를 쓰세요. 이 명령은 그 자리에서 기다리며, `--no-wait`를 붙이면 기다리지 않습니다. 명령은 워크스페이스 폴더를 인자로 받거나, 그 폴더 안에서 실행하면 현재 폴더를 씁니다. `init`을 제외한 모든 명령은 `config.yaml`이 없는 폴더를 거부합니다.
 
 결과는 `results/`에 `YYMMDD_제목_summary.md` + 전체 전사본으로 저장됩니다. 전사본만 필요하면 `summarizer: none`으로 두세요. 추측을 없애는 팁 두 가지:
 
 - 파일명의 단어 끝에 인원수를 넣기 — `북클럽 5명.m4a`(언어 `ko`) 또는 `standup 4p.m4a`(그 외 언어)
 - 또는 녹음 시작할 때 말하기 — "참석자 다섯 명입니다"
+- 또는 녹음을 넣은 뒤에 알려 주기(다음 절)
 
 파일명의 인원수는 다음 형태만 인식합니다. `language: ko`에서는 한두 자리 숫자 뒤에 `명` 또는 `인`이 오고(`5명`, `3인`) 그 뒤에 한글이 이어지지 않는 경우, 그 외 언어에서는 숫자 뒤에 `p`, `ppl`, `people`, `speakers`가 단어로 오는 경우(`4p`, `4 people`, `4 speakers`)입니다. 1부터 30까지만 인정합니다. `1103` 같은 날짜, 연도, `3인칭`이나 `인터뷰` 같은 낱말은 인원수로 읽지 않고, 인원수가 없는 제목은 그대로 둡니다.
 
 설정이 덜 끝났을 때(토큰 없음, ffmpeg 없음, 백엔드 패키지 누락, 요약 도구 없음) `watch`, `scan-inbox`, `process`는 무엇이 빠졌는지 알려 주고 모든 녹음을 제자리에 그대로 둡니다. 설정이 끝나기 전에는 어떤 파일도 가져가거나 옮기지 않습니다. `scan-inbox`는 설정 문제가 있거나 녹음 처리가 실패하면 종료 코드 1로 끝납니다.
+
+## 인원수 알려 주기
+
+참석 인원은 화자분리 정확도에 가장 큰 도움이 됩니다("기대할 수 있는 것" 참고). 그래서 moim-scribe는 받아쓰기를 시작하기 전에 인원수를 말할 시간을 줍니다.
+
+1. 녹음을 `inbox/`에 넣습니다. 파일명에 인원수가 있거나(`... 5명` / `... 5p`) `config.yaml`의 `default_speakers`가 0이 아니면 예전처럼 바로 시작합니다.
+2. 없으면 녹음은 그 자리에 그대로 두고 최대 **3분** 기다립니다.
+3. 그 사이에 둘 중 한 방법으로 인원수를 알려 주세요.
+   - 작업 폴더에서 Claude Code를 열고 Claude에게 말하기: "방금 넣은 거 4명이야". `init`이 작업 폴더에 Claude가 할 일을 적은 `CLAUDE.md`를 만들어 둡니다.
+   - 직접 `moim-scribe count 4` 실행. 기다리는 녹음이 여럿이면 파일명 일부를 붙입니다: `moim-scribe count 4 "team sync"`
+4. 알려 주면 다음 inbox 확인 때 시작합니다. 알려 주지 않으면 3분 뒤에 추정한 인원수로 시작하고, 요약에 인원수가 추정이라고 적힙니다. 파일명, 내가 알려 준 값, 녹음 첫머리에서 말한 값, `default_speakers`로 정한 인원수는 확정값으로 적히고, 짐작한 값만 추정으로 적힙니다.
+
+```
+$ moim-scribe waiting
+team-sync.m4a	3:00 left
+$ moim-scribe count 4
+recorded 4 speakers for team-sync.m4a
+it is processed on the next inbox pass
+```
+
+- `moim-scribe waiting`은 기다리는 녹음을 한 줄씩 보여 주고, 기다리는 것이 없으면 아무것도 출력하지 않습니다.
+- 파일명에 이미 인원수가 있으면 내가 알려 준 값보다 파일명이 우선입니다.
+- `watch`는 60초마다 inbox를 확인하므로, 인원수를 알려 준 뒤 실제로 시작하기까지 최대 1분쯤 걸릴 수 있습니다. `scan-inbox`는 그 자리에서 최대 3분 기다리며 화면에 그렇게 표시합니다. `--no-wait`를 붙이면 기다리지 않고 바로 처리합니다.
+- 기다리는 시간은 `config.yaml`의 `speaker_count_wait_sec`입니다. 기본은 180초이고, 0이면 기다리지 않습니다(0.2.0과 같은 동작). `scan-inbox`를 cron이나 작업 스케줄러로 돌린다면 `--no-wait`를 쓰거나 0으로 두세요.
+- 녹음 첫머리에서 말한 인원수는 받아쓴 뒤에야 알 수 있으므로, 그런 녹음도 3분은 기다립니다.
+- 녹음이 기다릴 때 Slack 메시지를 받고 싶다면 [docs/notify-slack.ko.md](docs/notify-slack.ko.md)를 보세요. 선택 사항이며 기본으로 연결된 것은 없습니다.
 
 ## 누가 누군지 가르치기
 
@@ -244,7 +272,9 @@ jsonl에 없는 라벨도 거부됩니다. 같은 명령의 나머지 사람은 
 
 - **녹음과 지문 등록은 모든 참가자의 동의를 받고 하세요.** 여러 나라에서 이것은 매너가 아니라 법적 요건입니다 — 한국 개인정보보호법상 개인을 식별하는 음성 특징 정보는 민감정보(생체인식정보)로 별도의 명시적 동의가 필요합니다.
 - 지문화는 항상 로컬이고, 최초 모델 다운로드 후에는 그 단계가 강제 오프라인으로 동작합니다. 네트워크에 닿을 수 있는 단계는 둘이며 직접 그렇게 설정했을 때만 그렇습니다 — `stt_backend: soniox`는 **녹음 파일**을(`glossary.txt`가 있으면 그 내용도 참고 문맥으로), 클라우드 정리 백엔드는 **전사본**(과 녹음 제목·시각, 화자 통계, 팩이 매칭되면 그 배경지식)을 보냅니다. 기본 설정은 녹음을 내보내지 않습니다.
-- 지문(`speakers/`)·녹음·명단은 리포 밖 워크스페이스에 있고, `init`이 방어용 `.gitignore`까지 깔아줍니다(`packs/`와 `glossary.txt`도 포함). 워크스페이스를 공개 저장소에 올리지 마세요.
+- 지문(`speakers/`)·녹음·명단과, 내가 알려 준 인원수의 작은 기록(`.moim-scribe-headcount/`, [docs/privacy.md](docs/privacy.md) 참고)은 리포 밖 워크스페이스에 있고, `init`이 방어용 `.gitignore`까지 깔아줍니다(`packs/`와 `glossary.txt`도 포함). 워크스페이스를 공개 저장소에 올리지 마세요.
+- **작업 폴더에서 Claude Code를 여는 것은 새로운 경계입니다.** 작업 폴더에서 Claude Code를 열면(예: Claude에게 인원수를 말하려고) Claude는 그 폴더의 모든 파일, 즉 녹음, 전사본, 요약, 음성 지문을 읽을 수 있습니다. 읽은 내용은 그 대화의 일부로 Anthropic에 전송됩니다. `init`이 만드는 `CLAUDE.md`는 시키기 전에는 열지 말라고 Claude에게 적어 두지만, 이것은 지시일 뿐 막는 장치가 아닙니다. 막는 것은 아무것도 없습니다. 받아들이기 어렵다면 다른 폴더에서 Claude Code를 열고 인원수는 `moim-scribe count`로 알려 주세요.
+- **Slack 알림을 직접 연결하면 녹음 파일 이름이 Slack으로 나갑니다.** 직접 만들지 않으면 꺼져 있습니다([docs/notify-slack.ko.md](docs/notify-slack.ko.md)). 파일 이름에는 회의 제목이나 사람 이름이 들어 있는 경우가 많습니다.
 
 상세: [docs/privacy.md](docs/privacy.md)
 
@@ -257,12 +287,17 @@ launchd(macOS)·systemd(Linux)·작업 스케줄러(Windows) 템플릿: [docs/de
 - **설정 문제는 녹음을 건드리기 전에 멈춥니다.** 토큰 없음, ffmpeg 없음, 백엔드 패키지 누락, 요약 도구 없음: `watch` / `scan-inbox` / `process`는 무엇이 빠졌는지 출력하고 모든 녹음을 inbox에 그대로 둡니다. 고치면 다음 순회에서 처리됩니다. `watch`는 계속 돌면서 순회마다 다시 점검합니다.
 - **`inbox/_error/`** 에는 스스로 실패한 녹음이 들어갑니다(디코딩 불가, 파일명이 너무 긺, 중간에 멈춘 실행의 잔여물). 이유는 로그 한 줄에 있으니 고친 뒤 파일을 `inbox/`로 다시 옮기면 재시도됩니다.
 - **요약이 실패해도 전사본은 남습니다.** 화자분리 전사본은 요약을 시도하기 전에 `results/`에 먼저 쓰이므로, 정리 백엔드가 실패해도 전사본은 있습니다. 요약을 다시 시도하려면 녹음을 `inbox/`로 되돌리세요.
+- **경고 없이 `inbox/`에 몇 분 머무는 녹음**은 멈춘 것이 아니라 인원수를 기다리는 중일 수 있습니다. `moim-scribe waiting`으로 보이고, 기다리는 시간(기본 3분)이 지나면 저절로 시작합니다.
 - **`inbox/`에 남아 경고를 찍는 파일**은 아직 내려받는 중이거나 올바른 오디오 파일이 아닌 것입니다. 내려받는 중이 아니라면 `inbox/`에서 치우세요.
 - `scan-inbox`는 녹음이 실패했거나 설정이 덜 끝났으면 종료 코드 1로 끝나므로, 스케줄러가 알아챌 수 있습니다.
 
 ## 유지보수
 
 best-effort로 운영합니다: 이슈·PR은 읽지만 응답 기한은 보장하지 않습니다. 포크 환영합니다.
+
+## 0.2.0에서 올리기
+
+파일명에 인원수가 없는 녹음은 이제 시작하기 전에 최대 3분 기다립니다("인원수 알려 주기" 참고). 0.2.0처럼 바로 시작하게 하려면 `config.yaml`에 `speaker_count_wait_sec: 0`을 적으세요. `moim-scribe init <워크스페이스>`를 다시 실행하면 안내 파일 `CLAUDE.md`가 추가됩니다. 이미 있는 파일은 건드리지 않습니다.
 
 ## 0.1에서 올리기
 
@@ -274,7 +309,7 @@ best-effort로 운영합니다: 이슈·PR은 읽지만 응답 기한은 보장�
 - **팩.** `match.json`의 `"type"`과 `"style"`은 무시됩니다. 제목 키워드만으로 매칭합니다.
 - **파일명.** 요약은 이제 `YYMMDD_제목_summary.md`입니다.
 - **`moim-scribe process`** 에 `--type`이 필요 없습니다(넣어도 무시됩니다). 비공개 사본으로 작업하며, 워크스페이스 `inbox/` 안의 파일은 거부합니다.
-- **`init`은 다시 실행해도 안전합니다.** `config.yaml`을 덮어쓰지 않고, 빠진 렌즈 파일과 `.gitignore` 항목만 추가하며, `--force`는 이제 아무 일도 하지 않습니다. `--reset-config`는 옛 파일을 `config.yaml.bak`으로 저장한 뒤 새 설정을 씁니다. 이미 있는 백업은 덮어쓰지 않고 다음 이름(`config.yaml.bak.2`, `config.yaml.bak.3`, ...)을 쓰며, 어떤 이름으로 저장했는지 출력합니다. 새 설정의 언어는 `--language`로 정하고(기본 `ko`), 어떤 언어로 썼는지도 출력합니다.
+- **`init`은 다시 실행해도 안전합니다.** `config.yaml`을 덮어쓰지 않고, 빠진 렌즈 파일, 안내 파일 `CLAUDE.md`, `.gitignore` 항목만 추가하며, `--force`는 이제 아무 일도 하지 않습니다. `--reset-config`는 옛 파일을 `config.yaml.bak`으로 저장한 뒤 새 설정을 씁니다. 이미 있는 백업은 덮어쓰지 않고 다음 이름(`config.yaml.bak.2`, `config.yaml.bak.3`, ...)을 쓰며, 어떤 이름으로 저장했는지 출력합니다. 새 설정의 언어는 `--language`로 정하고(기본 `ko`), 어떤 언어로 썼는지도 출력합니다.
 - **`config.yaml`은 불러올 때 검증됩니다.** 모르는 키는 알려 주고, 잘못된 값은 전사를 시작하기 전에 오류가 되며, `summarizer: null`은 `none`으로 읽고, `stt`는 `stt_backend`의 다른 표기로 받아들입니다.
 
 ## 로드맵 (v0.2 범위 밖)

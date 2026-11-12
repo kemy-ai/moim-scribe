@@ -34,7 +34,7 @@ that is already split by speaker.
   choice for a crowded recording that matters.
 - **Soniox itself cannot be told how many speakers there are.** Diarization is
   a single on/off switch and it detects up to 15 speakers by itself. A count in
-  the filename reaches pyannote when the hybrid step runs, and is dropped
+  the filename, or one you give with `moim-scribe count`, reaches pyannote when the hybrid step runs, and is dropped
   otherwise — the log says which happened.
 - It costs money and has quotas you have to keep an eye on (below).
 
@@ -98,8 +98,9 @@ hybrid_diarization: true    # default
   models if you have never used the local path. `moim-scribe doctor` fails on a
   missing `pyannote.audio` when a token is present, so you find that out before
   a recording does.
-- A speaker count in the filename (`team meeting 5p.m4a`) reaches pyannote here.
-  It is the only way that hint does anything on this path; Soniox takes no
+- A speaker count in the filename (`team meeting 5p.m4a`), or one you give with
+  `moim-scribe count`, reaches pyannote here. It is the only way a count does
+  anything on this path; Soniox takes no
   count of its own.
 
 Set it to `false` to keep Soniox's labels even when pyannote is available.
