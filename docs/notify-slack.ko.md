@@ -17,7 +17,7 @@ Slack에서 내 워크스페이스에 앱을 만들고, Incoming Webhooks를 켠
 
 ## 2단계: 스크립트
 
-같은 스크립트가 저장소에 [examples/notify-slack.sh](examples/notify-slack.sh)로 들어 있습니다. `curl`과 POSIX 셸이 필요합니다(macOS, Linux. 윈도우는 WSL이나 Git Bash). 녹음이 기다리기 시작할 때 메시지를 한 번 보내고, 같은 녹음에 대해서는 다음 실행에서 다시 보내지 않습니다.
+같은 스크립트가 저장소에 [examples/notify-slack.sh](examples/notify-slack.sh)로 들어 있습니다. `curl`과 POSIX 셸이 필요하며 macOS와 Linux용입니다. 윈도우에서는 그대로 돌리지 마십시오(Git에 딸린 sh에서는 한글처럼 ASCII 밖의 파일명이 깨집니다). 같은 일을 PowerShell 등으로 직접 짜서 쓰십시오. 녹음이 기다리기 시작할 때 메시지를 한 번 보내고, 같은 녹음에 대해서는 다음 실행에서 다시 보내지 않습니다.
 
 ```sh
 #!/bin/sh

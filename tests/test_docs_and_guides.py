@@ -11,6 +11,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import tomllib
 from pathlib import Path
@@ -162,6 +163,14 @@ def test_slack_guides_hold_no_real_webhook():
             assert url.rstrip(".") in ("https://hooks.slack.com/", "https://hooks.slack.com/..."), url
 
 
+# The script is for macOS and Linux shells. On Windows, the sh that comes with
+# Git passes file names outside ASCII through a code page and garbles them, and
+# Windows is tested by CI only: the guide tells Windows users to write their own.
+posix_only = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the example script is for macOS and Linux shells; on Windows, Git's sh "
+           "garbles file names outside ASCII",
+)
 needs_sh = pytest.mark.skipif(
     shutil.which("sh") is None or shutil.which("curl") is None or shutil.which("cksum") is None,
     reason="the example script needs a POSIX shell and curl",
@@ -198,6 +207,7 @@ class _Sink:
         self.server.server_close()
 
 
+@posix_only
 @needs_sh
 def test_example_script_sends_each_waiting_recording_once_and_keeps_the_json_valid(tmp_path):
     fake = tmp_path / "bin" / "moim-scribe"
@@ -237,6 +247,7 @@ def test_example_script_sends_each_waiting_recording_once_and_keeps_the_json_val
         assert len(sink.bodies) == 2  # nothing waits: nothing sent
 
 
+@posix_only
 @needs_sh
 def test_example_script_retries_after_a_failed_send(tmp_path):
     import os
@@ -256,6 +267,7 @@ def test_example_script_retries_after_a_failed_send(tmp_path):
         assert up.returncode == 0 and len(sink.bodies) == 1
 
 
+@posix_only
 def test_example_script_refuses_to_run_without_an_address():
     if shutil.which("sh") is None:
         pytest.skip("no POSIX shell")

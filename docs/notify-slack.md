@@ -17,7 +17,7 @@ In Slack, create an app for your workspace, turn on Incoming Webhooks and add on
 
 ## Step 2: the script
 
-The same script is in the repository as [examples/notify-slack.sh](examples/notify-slack.sh). It needs `curl` and a POSIX shell (macOS and Linux; on Windows use WSL or Git Bash). It sends one message when a recording starts waiting, and does not send it again for the same recording on later runs.
+The same script is in the repository as [examples/notify-slack.sh](examples/notify-slack.sh). It needs `curl` and a POSIX shell: it is for macOS and Linux. On Windows do not run it as it is (under the sh that comes with Git, file names outside ASCII, Korean ones for example, come out garbled): write the same steps yourself, in PowerShell for example. It sends one message when a recording starts waiting, and does not send it again for the same recording on later runs.
 
 ```sh
 #!/bin/sh
